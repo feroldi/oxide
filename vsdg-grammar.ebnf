@@ -1,0 +1,59 @@
+program = module, { module } ;
+
+module = "module", [ identifier ], "{", module body, "}", ;
+
+module body = [ "public" ], module item, { [ "public" ], module item } ;
+
+module item = data definition
+            | const definition
+            | "function", identifier, "(", [ argument list ], ")", [ num rets ], "{", function body, "}" ;
+
+data definition = "data", identifier, parameters, ";" ;
+
+const definition = "const", identifier, parameters, ";" ;
+
+argument list = identifier, { ",", identifier } ;
+
+num rets = "," integer constant ;
+
+function body = function item, { function item } ;
+
+function item = "node", identifier, parameters, ";"
+              | "edge", identifier, [ port name ], [ tuple name ], "->", identifier, [ port name ], [ tuple name ], [ parameters ], ";"
+              | data definition
+              | const definition ;
+
+port name = ":", identifier ;
+
+tuple name = "<", identifier, ">" ;
+
+parameters = "[", parameter list, "]" ;
+
+parameter list = parameter, { ",", parameter } ;
+
+parameter = identifier, "=", identifier
+          | identifier, "=", integer constant
+          | identifier, "=", float constant
+          | identifier, "=", "{", value list, "}" ;
+
+value list = value, { ",", value } ;
+
+value = identifier
+      | integer constant
+      | float constant ;
+
+identifier = nondigit, { digit | nondigit } ;
+
+nondigit = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h"
+         | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p"
+         | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x"
+         | "y" | "z" | "A" | "B" | "C" | "D" | "E" | "F"
+         | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N"
+         | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V"
+         | "W" | "X" | "Y" | "Z" | "_";
+
+digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+
+integer constant = ? integer-constant as specified in the C standard ? ;
+
+float constant = ? float-constant as specified in the C standard ? ;

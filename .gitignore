@@ -30,3 +30,7 @@
 *.exe
 *.out
 *.app
+
+/target/
+**/*.rs.bk
+Cargo.lock

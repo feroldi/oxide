@@ -1,5 +1,5 @@
-# Baessel
+# Oxide
 
-[![Build Status](https://travis-ci.org/feroldi/baessel.svg?branch=master)](https://travis-ci.org/feroldi/baessel)
+[![Build Status](https://travis-ci.org/feroldi/oxide.svg?branch=master)](https://travis-ci.org/feroldi/oxide)
 
-Baessel is an implementation of the Regionalized Value State Dependence Graph as an intermediate representation for multiple compiling stages.
+Oxide is an implementation of the Regionalized Value State Dependence Graph as an intermediate representation for multiple compiling stages.

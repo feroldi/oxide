@@ -1,5 +1,5 @@
 [package]
-name = "baessel"
+name = "oxide"
 version = "0.1.0"
 authors = ["Mário Feroldi <mferoldif@gmail.com>"]
 edition = "2018"

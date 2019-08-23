@@ -1,5 +1,11 @@
 use std::collections::HashMap;
 
+struct Interned<'ncx, T: ?Sized>(&'ncx T);
+
+enum NodeKind<'ncx> {
+    Binary(Operator, Node<'ncx>, Node<'ncx>),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PortType {
     Value,
@@ -8,12 +14,15 @@ enum PortType {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct InputPort {
-    kind: PortType,
+    port_type: PortType,
+    origin: OutputPort,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct OutputPort {
-    kind: PortType,
+struct OutputPort<'a> {
+    port_type: PortType,
+    index: usize,
+    producer: NodeRef<'a>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -26,19 +35,48 @@ enum Operator {
     Neg,
 }
 
-struct NodeData {
-    inputs: Vec<InputPort>,
-    outputs: Vec<OutputPort>,
-    operator: Operator,
+/// Signature of a node.
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct Sig {
+    val_ins: usize,
+    val_outs: usize,
+    st_ins: usize,
+    st_outs: usize,
 }
 
-struct NodeRef<'a> {
-    graph: &'a Graph,
-    node_id: NodeId,
+type Node<'ncx> = &'ncx NodeS<'ncx>;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct ValIn<'ncx> {
+    index: usize,
+    origin: Node<'ncx>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct NodeId(usize);
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum BinOp {
+    Add,
+    Sub,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum UnOp {
+    Neg,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum NodeKind<'ncx> {
+    Lit(u128),
+    Unary(UnOp, ValIn<'ncx>),
+    Bin(BinOp, ValIn<'ncx>, ValIn<'ncx>),
+}
+
+struct NodeS<'ncx> {
+    kind: NodeKind<'ncx>,
+}
+
+struct NodeCtxt<'ncx> {
+
+}
 
 struct Graph {
     lit_nodes: HashMap<u64, NodeId>,
@@ -56,14 +94,14 @@ impl Graph {
     /// Returns a literal value node. This reuses a pre-existing node based on
     /// its value, or the node is created if none exists.
     fn get_lit<'a>(&'a mut self, lit_value: u64) -> NodeRef<'a> {
-        let next_node_id = NodeId(self.nodes.len());
+        let next_node_id = self.compute_next_node_id();
         let node_id = *self.lit_nodes.entry(lit_value).or_insert(next_node_id);
 
         if node_id == next_node_id {
             self.nodes.push(NodeData {
                 inputs: Vec::new(),
                 outputs: vec![OutputPort {
-                    kind: PortType::Value,
+                    port_type: PortType::Value,
                 }],
                 operator: Operator::Lit(lit_value),
             });
@@ -73,6 +111,44 @@ impl Graph {
             graph: self,
             node_id,
         }
+    }
+
+    // TODO: check if both operands type-match.
+    /// Creates a binary ADD operation node with `lhs` and `rhs` as operands.
+    fn create_add<'a>(&'a mut self, lhs: NodeRef<'a>, rhs: NodeRef<'a>) -> NodeRef<'a> {
+        let add_node_data = NodeData {
+            inputs: vec![
+                InputPort {
+                    port_type: PortType::Value,
+                    origin: lhs.value_output(0),
+                },
+                InputPort {
+                    port_type: PortType::Value,
+                    origin: rhs.value_output(0),
+                },
+            ],
+            outputs: vec![OutputPort {
+                port_type: PortType::Value,
+            }],
+            operator: Operator::BinAdd,
+        };
+
+        let node_id = self.push_node(add_node_data);
+
+        NodeRef {
+            graph: self,
+            node_id,
+        }
+    }
+
+    fn compute_next_node_id(&self) -> NodeId {
+        NodeId(self.nodes.len())
+    }
+
+    fn push_node(&mut self, node_data: NodeData) -> NodeId {
+        let next_node_id = self.compute_next_node_id();
+        self.nodes.push(node_data);
+        next_node_id
     }
 }
 

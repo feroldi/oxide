@@ -5,3 +5,4 @@ authors = ["Mário Feroldi <mferoldif@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+rustc-ap-arena = "565.0.0"

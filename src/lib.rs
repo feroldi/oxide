@@ -195,6 +195,10 @@ impl<'ncx> NodeCtxt<'ncx> {
         self.gcx.interners.intern_node(node_kind)
     }
 
+    fn mk_lit(&self, value: u128) -> Node<'ncx> {
+        self.mk_node(NodeKind::Lit(value))
+    }
+
     fn mk_add(&self, lhs: Node<'ncx>, rhs: Node<'ncx>) -> Node<'ncx> {
         self.mk_node(NodeKind::Bin(
             BinOp::Add,
@@ -234,9 +238,9 @@ mod test {
         let gcx = GlobalCtxt::new(&arena);
         let ncx = NodeCtxt { gcx: &gcx };
 
-        let n0 = ncx.mk_node(NodeKind::Lit(0));
-        let n1 = ncx.mk_node(NodeKind::Lit(1));
-        let n2 = ncx.mk_node(NodeKind::Lit(0));
+        let n0 = ncx.mk_lit(0);
+        let n1 = ncx.mk_lit(1);
+        let n2 = ncx.mk_lit(0);
 
         assert_ne!(n0, n1);
         assert_ne!(n1, n2);

@@ -70,6 +70,8 @@ enum NodeKind<'ncx> {
     Bin(BinOp, ValIn<'ncx>, ValIn<'ncx>),
 }
 
+// TODO: This works better as a procedural macro. Also, implement the ValOut and
+// StOut ports.
 trait Signature {
     fn sig(&self) -> Sig;
 }

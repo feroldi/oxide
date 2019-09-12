@@ -1,267 +1,187 @@
-//! Oxide uses the same interning architecture as the Rust compiler's for
-//! avoiding duplication of equivalent nodes.
+use std::cell::{Cell, Ref, RefCell};
 
-#![feature(hash_raw_entry)]
-
-use arena::DroplessArena;
-use std::{
-    borrow::Borrow,
-    cell::RefCell,
-    cmp::Ordering,
-    collections::{hash_map::RawEntryMut, HashMap},
-    hash::{BuildHasher, Hash, Hasher},
-    ptr,
-};
+#[derive(Clone, Copy, PartialEq)]
+struct NodeId(usize);
 
 #[derive(Clone, Copy)]
-struct Interned<'ncx, T: ?Sized>(&'ncx T);
-
-impl<'ncx> PartialEq for Interned<'ncx, NodeS<'ncx>> {
-    fn eq(&self, other: &Interned<'ncx, NodeS<'ncx>>) -> bool {
-        self.0.kind == other.0.kind
-    }
+struct InId {
+    node: NodeId,
+    index: usize,
 }
 
-impl<'ncx> Eq for Interned<'ncx, NodeS<'ncx>> {}
-
-impl<'ncx> Hash for Interned<'ncx, NodeS<'ncx>> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.kind.hash(state);
-    }
+#[derive(Clone, Copy)]
+struct OutId {
+    node: NodeId,
+    index: usize,
 }
 
-impl<'ncx> Borrow<NodeKind<'ncx>> for Interned<'ncx, NodeS<'ncx>> {
-    fn borrow<'a>(&'a self) -> &'a NodeKind<'ncx> {
-        &self.0.kind
-    }
+struct InData {
+    origin: OutId,
+    prev_user: Cell<Option<InId>>,
+    next_user: Cell<Option<InId>>,
 }
 
-type Node<'ncx> = &'ncx NodeS<'ncx>;
+#[derive(Clone, Default)]
+struct OutData {
+    users: Cell<Option<Users>>,
+}
+
+#[derive(Clone, Copy)]
+struct Users {
+    first: InId,
+    last: InId,
+}
+
+struct NodeData<S> {
+    ins: Vec<InData>,
+    outs: Vec<OutData>,
+    data: S,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
-struct Sig {
+struct SigS {
     val_ins: usize,
     val_outs: usize,
     st_ins: usize,
     st_outs: usize,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct ValIn<'ncx> {
-    proj_index: usize,
-    origin: Node<'ncx>,
-}
+trait Sig {
+    fn sig(&self) -> SigS;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum BinOp {
-    Add,
-    Sub,
-}
+    fn ins_len(&self) -> usize {
+        self.sig().val_ins + self.sig().st_ins
+    }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum UnOp {
-    Neg,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum NodeKind<'ncx> {
-    Lit(u128),
-    Unary(UnOp, ValIn<'ncx>),
-    Bin(BinOp, ValIn<'ncx>, ValIn<'ncx>),
-}
-
-// TODO: This works better as a procedural macro. Also, implement the ValOut and
-// StOut ports.
-trait Signature {
-    fn sig(&self) -> Sig;
-}
-
-impl<'ncx> Signature for NodeKind<'ncx> {
-    fn sig(&self) -> Sig {
-        match self {
-            NodeKind::Lit(..) => Sig {
-                val_outs: 1,
-                ..Default::default()
-            },
-            NodeKind::Unary(..) => Sig {
-                val_ins: 1,
-                val_outs: 1,
-                ..Default::default()
-            },
-            NodeKind::Bin(..) => Sig {
-                val_ins: 2,
-                val_outs: 1,
-                ..Default::default()
-            },
-        }
+    fn outs_len(&self) -> usize {
+        self.sig().val_outs + self.sig().st_outs
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-struct NodeS<'ncx> {
-    kind: NodeKind<'ncx>,
+struct NodeCtxt<S> {
+    nodes: RefCell<Vec<NodeData<S>>>,
 }
 
-impl<'ncx> Ord for NodeS<'ncx> {
-    fn cmp(&self, other: &NodeS<'ncx>) -> Ordering {
-        self.kind.cmp(&other.kind)
-    }
-}
-
-impl<'ncx> PartialOrd for NodeS<'ncx> {
-    fn partial_cmp(&self, other: &NodeS<'ncx>) -> Option<Ordering> {
-        Some(self.kind.cmp(&other.kind))
-    }
-}
-
-impl<'ncx> PartialEq for NodeS<'ncx> {
-    fn eq(&self, other: &NodeS<'ncx>) -> bool {
-        ptr::eq(self, other)
-    }
-}
-
-impl<'ncx> Eq for NodeS<'ncx> {}
-
-impl<'ncx> Hash for NodeS<'ncx> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        (self as *const NodeS<'_>).hash(state)
-    }
-}
-
-struct InternedHashSet<K: Eq + Hash> {
-    set: RefCell<HashMap<K, ()>>,
-}
-
-impl<K: Eq + Hash + Copy> InternedHashSet<K> {
-    fn new() -> InternedHashSet<K> {
-        InternedHashSet {
-            set: Default::default(),
+impl<S: Sig> NodeCtxt<S> {
+    fn new() -> NodeCtxt<S> {
+        NodeCtxt {
+            nodes: RefCell::new(vec![]),
         }
     }
 
-    fn intern<Q>(&self, value: Q, make: impl FnOnce(Q) -> K) -> K
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq,
-    {
-        let mut set = self.set.borrow_mut();
-        let hash = {
-            let mut hasher = (*set).hasher().build_hasher();
-            value.hash(&mut hasher);
-            hasher.finish()
-        };
+    fn mk_node(&self, data: S, origins: &[OutId]) -> NodeId {
+        // TODO:
+        // + Create the InData sequence, connecting sinks as you go.
+        // + Initialize the OutData sequence with empty users.
+        // + Push the new node to the node context and return its id.
+        assert!(data.ins_len() == origins.len());
 
-        let entry = set.raw_entry_mut().from_key_hashed_nocheck(hash, &value);
+        let mut new_node_inputs = Vec::<InData>::with_capacity(data.ins_len());
+        let node_id = NodeId(self.nodes.borrow().len());
 
-        match entry {
-            RawEntryMut::Occupied(e) => *e.key(),
-            RawEntryMut::Vacant(e) => {
-                let val = make(value);
-                e.insert_hashed_nocheck(hash, val, ());
-                val
-            }
+        for (i, &origin) in origins.iter().enumerate() {
+            let in_id = InId {
+                node: node_id,
+                index: i,
+            };
+            let (prev_user, new_out_users) = match self.out_data(origin).users.get() {
+                Some(users) => {
+                    if users.last.node == node_id {
+                        // FIXME: Is this a dead branch?
+                        new_node_inputs[users.last.index].next_user.set(Some(in_id));
+                    } else {
+                        self.in_data(users.last).next_user.set(Some(in_id));
+                    }
+                    let prev_user = Some(users.last);
+                    let new_out_users = Users {
+                        first: users.first,
+                        last: in_id,
+                    };
+                    (prev_user, new_out_users)
+                }
+                None => (
+                    None,
+                    Users {
+                        first: in_id,
+                        last: in_id,
+                    },
+                ),
+            };
+            self.out_data(origin).users.set(Some(new_out_users));
+            new_node_inputs.push(InData {
+                origin,
+                prev_user: Cell::new(prev_user),
+                next_user: Cell::default(),
+            });
         }
-    }
-}
 
-type InternedSet<'ncx, T> = InternedHashSet<Interned<'ncx, T>>;
-
-struct CtxtInterners<'ncx> {
-    arena: &'ncx DroplessArena,
-    nodes: InternedSet<'ncx, NodeS<'ncx>>,
-}
-
-impl<'ncx> CtxtInterners<'ncx> {
-    fn new(arena: &'ncx DroplessArena) -> CtxtInterners<'ncx> {
-        CtxtInterners {
-            arena,
-            nodes: InternedSet::new(),
-        }
-    }
-
-    fn intern_node(&self, node_kind: NodeKind<'ncx>) -> Node<'ncx> {
-        let Interned(node_ref) = self.nodes.intern(node_kind, |node_kind| {
-            Interned(self.arena.alloc(NodeS { kind: node_kind }))
+        self.nodes.borrow_mut().push(NodeData {
+            ins: new_node_inputs,
+            outs: vec![OutData::default(); data.outs_len()],
+            data,
         });
-        node_ref
-    }
-}
 
-#[derive(Clone, Copy)]
-struct NodeCtxt<'ncx> {
-    gcx: &'ncx GlobalCtxt<'ncx>,
-}
-
-impl<'ncx> NodeCtxt<'ncx> {
-    fn mk_node(&self, node_kind: NodeKind<'ncx>) -> Node<'ncx> {
-        self.gcx.interners.intern_node(node_kind)
+        node_id
     }
 
-    fn mk_lit(&self, value: u128) -> Node<'ncx> {
-        self.mk_node(NodeKind::Lit(value))
+    fn node_data(&self, id: NodeId) -> Ref<NodeData<S>> {
+        Ref::map(self.nodes.borrow(), |nodes| &nodes[id.0])
     }
 
-    fn mk_add(&self, lhs: Node<'ncx>, rhs: Node<'ncx>) -> Node<'ncx> {
-        self.mk_node(NodeKind::Bin(
-            BinOp::Add,
-            ValIn {
-                proj_index: 0,
-                origin: lhs,
-            },
-            ValIn {
-                proj_index: 0,
-                origin: rhs,
-            },
-        ))
+    fn in_data(&self, id: InId) -> Ref<InData> {
+        Ref::map(self.node_data(id.node), |data| &data.ins[id.index])
     }
-}
 
-struct GlobalCtxt<'ncx> {
-    interners: CtxtInterners<'ncx>,
-}
-
-impl<'ncx> GlobalCtxt<'ncx> {
-    fn new(arena: &'ncx DroplessArena) -> GlobalCtxt<'ncx> {
-        GlobalCtxt {
-            interners: CtxtInterners::new(arena),
-        }
+    fn out_data(&self, id: OutId) -> Ref<OutData> {
+        Ref::map(self.node_data(id.node), |data| &data.outs[id.index])
     }
 }
 
 #[cfg(test)]
 mod test {
-    use super::{BinOp, GlobalCtxt, NodeCtxt, NodeKind};
-    use arena::DroplessArena;
-    use std::ptr;
+    use super::{NodeCtxt, OutId, Sig, SigS};
+
+    enum TestData {
+        Lit(u32),
+        Add,
+    }
+
+    impl Sig for TestData {
+        fn sig(&self) -> SigS {
+            match self {
+                TestData::Lit(..) => SigS {
+                    val_outs: 1,
+                    ..SigS::default()
+                },
+                TestData::Add => SigS {
+                    val_ins: 2,
+                    val_outs: 1,
+                    ..SigS::default()
+                },
+            }
+        }
+    }
 
     #[test]
-    fn reuse_nodes_that_compare_equal() {
-        let arena = DroplessArena::default();
-        let gcx = GlobalCtxt::new(&arena);
-        let ncx = NodeCtxt { gcx: &gcx };
+    fn create_nodes() {
+        let ncx = NodeCtxt::new();
 
-        let n0 = ncx.mk_lit(0);
-        let n1 = ncx.mk_lit(1);
-        let n2 = ncx.mk_lit(0);
+        let n0 = ncx.mk_node(TestData::Lit(2), &[]);
 
-        assert_ne!(n0, n1);
-        assert_ne!(n1, n2);
-        assert_eq!(n0, n2);
+        assert_eq!(0, ncx.node_data(n0).ins.len());
+        assert_eq!(1, ncx.node_data(n0).outs.len());
 
-        assert!(!ptr::eq(n0, n1));
-        assert!(!ptr::eq(n1, n2));
-        assert!(ptr::eq(n0, n2));
+        let n1 = ncx.mk_node(TestData::Lit(3), &[]);
 
-        let n3 = ncx.mk_add(n0, n1);
-        let n4 = ncx.mk_add(n1, n0);
-        let n5 = ncx.mk_add(n0, n1);
+        assert_eq!(0, ncx.node_data(n1).ins.len());
+        assert_eq!(1, ncx.node_data(n1).outs.len());
 
-        assert_ne!(n3, n4);
-        assert_ne!(n4, n5);
-        assert_eq!(n3, n5);
+        let n2 = ncx.mk_node(
+            TestData::Add,
+            &[OutId { node: n0, index: 0 }, OutId { node: n1, index: 0 }],
+        );
 
-        assert!(!ptr::eq(n3, n4));
-        assert!(!ptr::eq(n4, n5));
-        assert!(ptr::eq(n3, n5));
+        assert_eq!(2, ncx.node_data(n2).ins.len());
+        assert_eq!(1, ncx.node_data(n2).outs.len());
     }
 }

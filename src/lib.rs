@@ -1,9 +1,14 @@
+#![feature(hash_raw_entry)]
+
 use std::{
     cell::{Cell, Ref, RefCell},
-    fmt, ptr,
+    collections::{hash_map::RawEntryMut, HashMap},
+    fmt,
+    hash::{BuildHasher, Hash, Hasher},
+    ptr,
 };
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct NodeId(usize);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -12,7 +17,7 @@ struct InId {
     index: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct OutId {
     node: NodeId,
     index: usize,
@@ -69,14 +74,39 @@ impl<S: Sig> Sig for NodeData<S> {
     }
 }
 
+struct NodeTerm<S> {
+    data: S,
+    origins: Vec<OutId>,
+}
+
+impl<S: PartialEq> PartialEq for NodeTerm<S> {
+    fn eq(&self, other: &NodeTerm<S>) -> bool {
+        self.data == other.data && self.origins == other.origins
+    }
+}
+
+impl<S: Eq> Eq for NodeTerm<S> {}
+
+impl<S: Hash> Hash for NodeTerm<S> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.data.hash(state);
+        self.origins.hash(state);
+    }
+}
+
 struct NodeCtxt<S> {
     nodes: RefCell<Vec<NodeData<S>>>,
+    interned_nodes: RefCell<HashMap<NodeTerm<S>, NodeId>>,
 }
 
 impl<S> NodeCtxt<S> {
-    fn new() -> NodeCtxt<S> {
+    fn new() -> NodeCtxt<S>
+    where
+        S: Eq + Hash,
+    {
         NodeCtxt {
             nodes: RefCell::new(vec![]),
+            interned_nodes: RefCell::default(),
         }
     }
 
@@ -92,76 +122,105 @@ impl<S> NodeCtxt<S> {
         Ref::map(self.node_data(id.node), |data| &data.outs[id.index])
     }
 
+    fn hash_node_terms(&self, data: &S, origins: &[OutId]) -> u64
+    where
+        S: Eq + Hash,
+    {
+        let mut hasher = self.interned_nodes.borrow().hasher().build_hasher();
+        data.hash(&mut hasher);
+        origins.hash(&mut hasher);
+        hasher.finish()
+    }
+
     fn mk_node_with(&self, data: S, origins: &[OutId]) -> NodeId
     where
-        S: Sig,
+        S: Sig + Eq + Hash + Clone,
     {
-        // Node creation works as follows:
-        // 1. Create the InData sequence, connecting sinks as you go.
-        // 2. Initialize the OutData sequence with empty users.
-        // 3. Push the new node to the node context and return its id.
-        assert!(data.sig().ins_len() == origins.len());
+        assert_eq!(data.sig().ins_len(), origins.len());
 
-        // Input ports are first pushed into this vector, so the node creation comes
-        // down to just a push to the nodes vector.
-        let mut new_node_inputs = Vec::<InData>::with_capacity(data.sig().ins_len());
-        let node_id = NodeId(self.nodes.borrow().len());
+        let create_node = |data: S, origins: &[OutId]| {
+            // Node creation works as follows:
+            // 1. Create the InData sequence, connecting sinks as you go.
+            // 2. Initialize the OutData sequence with empty users.
+            // 3. Push the new node to the node context and return its id.
 
-        for (i, &origin) in origins.iter().enumerate() {
-            let in_id = InId {
-                node: node_id,
-                index: i,
-            };
-            let (prev_user, new_out_users) = match self.out_data(origin).users.get() {
-                Some(users) => {
-                    if users.last.node == node_id {
-                        // FIXME: Is this a dead branch?
-                        new_node_inputs[users.last.index].next_user.set(Some(in_id));
-                    } else {
-                        self.in_data(users.last).next_user.set(Some(in_id));
+            // Input ports are put into this vector so the node creation comes down to just
+            // a push into the `self.nodes`.
+            let mut new_node_inputs = Vec::<InData>::with_capacity(data.sig().ins_len());
+            let node_id = NodeId(self.nodes.borrow().len());
+
+            for (i, &origin) in origins.iter().enumerate() {
+                let new_in_id = InId {
+                    node: node_id,
+                    index: i,
+                };
+                let (prev_user, new_user_list) = match self.out_data(origin).users.get() {
+                    Some(UserList { first, last }) => {
+                        if last.node == node_id {
+                            new_node_inputs[last.index].next_user.set(Some(new_in_id));
+                        } else {
+                            self.in_data(last).next_user.set(Some(new_in_id));
+                        }
+                        let new_user_list = UserList {
+                            first,
+                            last: new_in_id,
+                        };
+                        (Some(last), new_user_list)
                     }
-                    let prev_user = Some(users.last);
-                    let new_out_users = UserList {
-                        first: users.first,
-                        last: in_id,
-                    };
-                    (prev_user, new_out_users)
-                }
-                None => (
-                    None, // No previous user.
-                    UserList {
-                        first: in_id,
-                        last: in_id,
-                    },
-                ),
-            };
-            self.out_data(origin).users.set(Some(new_out_users));
-            new_node_inputs.push(InData {
-                origin,
-                prev_user: Cell::new(prev_user),
-                next_user: Cell::default(),
+                    None => (
+                        None, // No previous user.
+                        UserList {
+                            first: new_in_id,
+                            last: new_in_id,
+                        },
+                    ),
+                };
+                self.out_data(origin).users.set(Some(new_user_list));
+                new_node_inputs.push(InData {
+                    origin,
+                    prev_user: Cell::new(prev_user),
+                    next_user: Cell::default(),
+                });
+            }
+
+            let sig = data.sig();
+
+            self.nodes.borrow_mut().push(NodeData {
+                ins: new_node_inputs,
+                outs: vec![OutData::default(); data.sig().outs_len()],
+                data,
             });
+
+            assert_eq!(self.node_data(node_id).ins.len(), sig.ins_len());
+            assert_eq!(self.node_data(node_id).outs.len(), sig.outs_len());
+
+            node_id
+        };
+
+        let node_term = NodeTerm {
+            data: data.clone(),
+            origins: origins.into(),
+        };
+
+        let node_hash = self.hash_node_terms(&data, origins);
+        let mut interned_nodes = self.interned_nodes.borrow_mut();
+        let entry = interned_nodes
+            .raw_entry_mut()
+            .from_key_hashed_nocheck(node_hash, &node_term);
+
+        match entry {
+            RawEntryMut::Occupied(e) => *e.get(),
+            RawEntryMut::Vacant(e) => {
+                let node_id = create_node(data, origins);
+                e.insert_hashed_nocheck(node_hash, node_term, node_id);
+                node_id
+            }
         }
-
-        let sig = data.sig();
-
-        self.nodes.borrow_mut().push(NodeData {
-            ins: new_node_inputs,
-            outs: vec![OutData::default(); data.sig().outs_len()],
-            data,
-        });
-
-        assert_eq!(
-            self.node_data(node_id).outs.len(),
-            sig.val_outs + sig.st_outs
-        );
-
-        node_id
     }
 
     fn mk_node(&self, data: S) -> Node<S>
     where
-        S: Sig,
+        S: Sig + Eq + Hash + Clone,
     {
         let node_id = self.mk_node_with(data, &[]);
         Node {
@@ -238,7 +297,10 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
         self
     }
 
-    fn finish(self) -> Node<'g, S> {
+    fn finish(self) -> Node<'g, S>
+    where
+        S: Eq + Hash + Clone,
+    {
         let sig = self.node_metadata.sig();
         assert_eq!(self.val_origins.len(), sig.val_ins);
         assert_eq!(self.st_origins.len(), sig.st_ins);
@@ -278,7 +340,7 @@ impl<'g, S> Node<'g, S> {
     }
 }
 
-impl<'g, S: Sig + Clone + Copy> Node<'g, S> {
+impl<'g, S: Sig + Copy> Node<'g, S> {
     fn val_in(&self, port: usize) -> ValIn<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.val_ins);
@@ -426,7 +488,7 @@ impl<'g, S> StOut<'g, S> {
 mod test {
     use super::{NodeCtxt, OutId, Sig, SigS};
 
-    #[derive(Clone, Copy, PartialEq, Debug)]
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum TestData {
         Lit(u32),
         Neg,
@@ -549,5 +611,40 @@ mod test {
         assert_eq!(n0.val_out(0), n3.val_in(0).origin());
         assert_eq!(n1.val_out(0), n3.val_in(1).origin());
         assert_eq!(n2.st_out(0), n3.st_in(0).origin());
+    }
+
+    #[test]
+    fn reuse_existing_eq_nodes_at_creation() {
+        let ncx = NodeCtxt::new();
+
+        let n0 = ncx.mk_node(TestData::Lit(2));
+        let n1 = ncx.mk_node(TestData::Lit(3));
+        let n2 = ncx.mk_node(TestData::Lit(2));
+
+        assert_eq!(n0.id, n2.id);
+        assert_ne!(n0.id, n1.id);
+        assert_ne!(n1.id, n2.id);
+
+        let n3 = ncx
+            .node_builder(TestData::BinAdd)
+            .with_val(n0.val_out(0))
+            .with_val(n1.val_out(0))
+            .finish();
+
+        let n4 = ncx
+            .node_builder(TestData::BinAdd)
+            .with_val(n0.val_out(0))
+            .with_val(n2.val_out(0))
+            .finish();
+
+        let n5 = ncx
+            .node_builder(TestData::BinAdd)
+            .with_val(n2.val_out(0))
+            .with_val(n1.val_out(0))
+            .finish();
+
+        assert_ne!(n3.id, n4.id);
+        assert_ne!(n4.id, n5.id);
+        assert_eq!(n3.id, n5.id);
     }
 }

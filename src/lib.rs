@@ -91,10 +91,11 @@ impl<S> NodeCtxt<S> {
     fn out_data(&self, id: OutId) -> Ref<OutData> {
         Ref::map(self.node_data(id.node), |data| &data.outs[id.index])
     }
-}
 
-impl<S: Sig> NodeCtxt<S> {
-    fn mk_node_with(&self, data: S, origins: &[OutId]) -> NodeId {
+    fn mk_node_with(&self, data: S, origins: &[OutId]) -> NodeId
+    where
+        S: Sig,
+    {
         // Node creation works as follows:
         // 1. Create the InData sequence, connecting sinks as you go.
         // 2. Initialize the OutData sequence with empty users.
@@ -157,51 +158,35 @@ impl<S: Sig> NodeCtxt<S> {
 
         node_id
     }
-}
-
-struct Graph<S> {
-    ncx: NodeCtxt<S>,
-}
-
-impl<S> PartialEq for Graph<S> {
-    fn eq(&self, other: &Graph<S>) -> bool {
-        ptr::eq(self, other)
-    }
-}
-
-impl<S> Graph<S> {
-    fn new(ncx: NodeCtxt<S>) -> Graph<S> {
-        Graph { ncx }
-    }
 
     fn mk_node(&self, data: S) -> Node<S>
     where
         S: Sig,
     {
-        let node_id = self.ncx.mk_node_with(data, &[]);
+        let node_id = self.mk_node_with(data, &[]);
         Node {
-            graph: self,
+            ctxt: self,
             id: node_id,
         }
     }
 
-    fn node_builder(&self, data: S) -> GraphNodeBuilder<S>
+    fn node_builder(&self, data: S) -> NodeBuilder<S>
     where
         S: Sig,
     {
-        GraphNodeBuilder::new(self, data)
+        NodeBuilder::new(self, data)
     }
 
     fn node_ref(&self, node_id: NodeId) -> Node<S> {
-        assert!(node_id.0 < self.ncx.nodes.borrow().len());
+        assert!(node_id.0 < self.nodes.borrow().len());
         Node {
-            graph: self,
+            ctxt: self,
             id: node_id,
         }
     }
 
     fn in_ref(&self, in_id: InId) -> In<S> {
-        assert!(in_id.index < self.ncx.node_data(in_id.node).ins.len());
+        assert!(in_id.index < self.node_data(in_id.node).ins.len());
         In {
             node: self.node_ref(in_id.node),
             port: in_id.index,
@@ -209,7 +194,7 @@ impl<S> Graph<S> {
     }
 
     fn out_ref(&self, out_id: OutId) -> Out<S> {
-        assert!(out_id.index < self.ncx.node_data(out_id.node).outs.len());
+        assert!(out_id.index < self.node_data(out_id.node).outs.len());
         Out {
             node: self.node_ref(out_id.node),
             port: out_id.index,
@@ -217,31 +202,37 @@ impl<S> Graph<S> {
     }
 }
 
-struct GraphNodeBuilder<'g, S> {
-    graph: &'g Graph<S>,
+impl<S> PartialEq for NodeCtxt<S> {
+    fn eq(&self, other: &NodeCtxt<S>) -> bool {
+        ptr::eq(self, other)
+    }
+}
+
+struct NodeBuilder<'g, S> {
+    ctxt: &'g NodeCtxt<S>,
     node_metadata: S,
     val_origins: Vec<ValOut<'g, S>>,
     st_origins: Vec<StOut<'g, S>>,
 }
 
-impl<'g, S: Sig> GraphNodeBuilder<'g, S> {
-    fn new(graph: &'g Graph<S>, node_metadata: S) -> GraphNodeBuilder<'g, S> {
+impl<'g, S: Sig> NodeBuilder<'g, S> {
+    fn new(ctxt: &'g NodeCtxt<S>, node_metadata: S) -> NodeBuilder<'g, S> {
         let sig = node_metadata.sig();
-        GraphNodeBuilder {
-            graph,
+        NodeBuilder {
+            ctxt,
             node_metadata,
             val_origins: Vec::with_capacity(sig.val_ins),
             st_origins: Vec::with_capacity(sig.st_ins),
         }
     }
 
-    fn with_val(mut self, val_out: ValOut<'g, S>) -> GraphNodeBuilder<S> {
+    fn with_val(mut self, val_out: ValOut<'g, S>) -> NodeBuilder<S> {
         assert!(self.val_origins.len() < self.node_metadata.sig().val_ins);
         self.val_origins.push(val_out);
         self
     }
 
-    fn with_state(mut self, st_out: StOut<'g, S>) -> GraphNodeBuilder<S> {
+    fn with_state(mut self, st_out: StOut<'g, S>) -> NodeBuilder<S> {
         assert!(self.st_origins.len() < self.node_metadata.sig().st_ins);
         self.st_origins.push(st_out);
         self
@@ -260,10 +251,10 @@ impl<'g, S: Sig> GraphNodeBuilder<'g, S> {
 
         assert_eq!(origins.len(), sig.val_ins + sig.st_ins);
 
-        let node_id = self.graph.ncx.mk_node_with(self.node_metadata, &origins);
+        let node_id = self.ctxt.mk_node_with(self.node_metadata, &origins);
 
         Node {
-            graph: self.graph,
+            ctxt: self.ctxt,
             id: node_id,
         }
     }
@@ -271,7 +262,7 @@ impl<'g, S: Sig> GraphNodeBuilder<'g, S> {
 
 #[derive(Clone, Copy, PartialEq)]
 struct Node<'g, S> {
-    graph: &'g Graph<S>,
+    ctxt: &'g NodeCtxt<S>,
     id: NodeId,
 }
 
@@ -283,7 +274,7 @@ impl<'g, S: fmt::Debug> fmt::Debug for Node<'g, S> {
 
 impl<'g, S> Node<'g, S> {
     fn data(&self) -> Ref<'g, NodeData<S>> {
-        self.graph.ncx.node_data(self.id)
+        self.ctxt.node_data(self.id)
     }
 }
 
@@ -334,12 +325,12 @@ impl<'g, S> In<'g, S> {
     }
 
     fn data(&self) -> Ref<'g, InData> {
-        self.node.graph.ncx.in_data(self.id())
+        self.node.ctxt.in_data(self.id())
     }
 
     fn origin(&self) -> Out<'g, S> {
         let origin = self.data().origin;
-        self.node.graph.out_ref(origin)
+        self.node.ctxt.out_ref(origin)
     }
 }
 
@@ -358,11 +349,11 @@ impl<'g, S> Out<'g, S> {
     }
 
     fn data(&self) -> Ref<'g, OutData> {
-        self.node.graph.ncx.out_data(self.id())
+        self.node.ctxt.out_data(self.id())
     }
 
     fn users(&self) -> Users<'g, S> {
-        let in_ref = |in_id| self.node.graph.in_ref(in_id);
+        let in_ref = |in_id| self.node.ctxt.in_ref(in_id);
         Users {
             first_and_last: self
                 .data()
@@ -385,7 +376,7 @@ impl<'g, S> Iterator for Users<'g, S> {
             Some((first, last)) => {
                 if first.id() != last.id() {
                     if let Some(next_user) = first.data().next_user.get() {
-                        self.first_and_last = Some((first.node.graph.in_ref(next_user), last));
+                        self.first_and_last = Some((first.node.ctxt.in_ref(next_user), last));
                     }
                 }
                 Some(first)
@@ -433,7 +424,7 @@ impl<'g, S> StOut<'g, S> {
 
 #[cfg(test)]
 mod test {
-    use super::{Graph, NodeCtxt, OutId, Sig, SigS};
+    use super::{NodeCtxt, OutId, Sig, SigS};
 
     #[derive(Clone, Copy, PartialEq, Debug)]
     enum TestData {
@@ -495,10 +486,9 @@ mod test {
     #[test]
     fn create_node_with_an_input_using_builder() {
         let ncx = NodeCtxt::new();
-        let g = Graph::new(ncx);
 
-        let n0 = g.mk_node(TestData::Lit(0));
-        let n1 = g
+        let n0 = ncx.mk_node(TestData::Lit(0));
+        let n1 = ncx
             .node_builder(TestData::Neg)
             .with_val(n0.val_out(0))
             .finish();
@@ -544,13 +534,12 @@ mod test {
     #[test]
     fn create_node_with_values_and_states_using_builder() {
         let ncx = NodeCtxt::new();
-        let g = Graph::new(ncx);
 
-        let n0 = g.mk_node(TestData::Lit(2));
-        let n1 = g.mk_node(TestData::Lit(3));
-        let n2 = g.mk_node(TestData::St);
+        let n0 = ncx.mk_node(TestData::Lit(2));
+        let n1 = ncx.mk_node(TestData::Lit(3));
+        let n2 = ncx.mk_node(TestData::St);
 
-        let n3 = g
+        let n3 = ncx
             .node_builder(TestData::LoadOffset)
             .with_val(n0.val_out(0))
             .with_val(n1.val_out(0))

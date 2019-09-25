@@ -40,10 +40,21 @@ struct UserList {
     last: InId,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum NodeKind<S> {
+    Op(S),
+    Apply {
+        arg_val_ins: usize,
+        arg_st_ins: usize,
+        region_val_res: usize,
+        region_st_res: usize,
+    },
+}
+
 struct NodeData<S> {
     ins: Vec<InData>,
     outs: Vec<OutData>,
-    data: S,
+    kind: NodeKind<S>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
@@ -70,18 +81,37 @@ trait Sig {
 
 impl<S: Sig> Sig for NodeData<S> {
     fn sig(&self) -> SigS {
-        self.data.sig()
+        self.kind.sig()
+    }
+}
+
+impl<S: Sig> Sig for NodeKind<S> {
+    fn sig(&self) -> SigS {
+        match self {
+            NodeKind::Op(s) => s.sig(),
+            &NodeKind::Apply {
+                arg_val_ins,
+                arg_st_ins,
+                region_val_res,
+                region_st_res,
+            } => SigS {
+                val_ins: 1 + arg_val_ins, // function input + argument inputs
+                st_ins: arg_st_ins,
+                val_outs: region_val_res,
+                st_outs: region_st_res,
+            },
+        }
     }
 }
 
 struct NodeTerm<S> {
-    data: S,
+    kind: NodeKind<S>,
     origins: Vec<OutId>,
 }
 
 impl<S: PartialEq> PartialEq for NodeTerm<S> {
     fn eq(&self, other: &NodeTerm<S>) -> bool {
-        self.data == other.data && self.origins == other.origins
+        self.kind == other.kind && self.origins == other.origins
     }
 }
 
@@ -89,7 +119,7 @@ impl<S: Eq> Eq for NodeTerm<S> {}
 
 impl<S: Hash> Hash for NodeTerm<S> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        self.kind.hash(state);
         self.origins.hash(state);
     }
 }
@@ -122,23 +152,23 @@ impl<S> NodeCtxt<S> {
         Ref::map(self.node_data(id.node), |data| &data.outs[id.index])
     }
 
-    fn hash_node_terms(&self, data: &S, origins: &[OutId]) -> u64
+    fn hash_node_terms(&self, kind: &NodeKind<S>, origins: &[OutId]) -> u64
     where
         S: Eq + Hash,
     {
         let mut hasher = self.interned_nodes.borrow().hasher().build_hasher();
-        data.hash(&mut hasher);
+        kind.hash(&mut hasher);
         origins.hash(&mut hasher);
         hasher.finish()
     }
 
-    fn mk_node_with(&self, data: S, origins: &[OutId]) -> NodeId
+    fn mk_node_with(&self, kind: NodeKind<S>, origins: &[OutId]) -> NodeId
     where
         S: Sig + Eq + Hash + Clone,
     {
-        assert_eq!(data.sig().ins_len(), origins.len());
+        assert_eq!(kind.sig().ins_len(), origins.len());
 
-        let create_node = |data: S, origins: &[OutId]| {
+        let create_node = |kind: NodeKind<S>, origins: &[OutId]| {
             // Node creation works as follows:
             // 1. Create the InData sequence, connecting sinks as you go.
             // 2. Initialize the OutData sequence with empty users.
@@ -146,7 +176,7 @@ impl<S> NodeCtxt<S> {
 
             // Input ports are put into this vector so the node creation comes down to just
             // a push into the `self.nodes`.
-            let mut new_node_inputs = Vec::<InData>::with_capacity(data.sig().ins_len());
+            let mut new_node_inputs = Vec::<InData>::with_capacity(kind.sig().ins_len());
             let node_id = NodeId(self.nodes.borrow().len());
 
             for (i, &origin) in origins.iter().enumerate() {
@@ -183,12 +213,12 @@ impl<S> NodeCtxt<S> {
                 });
             }
 
-            let sig = data.sig();
+            let sig = kind.sig();
 
             self.nodes.borrow_mut().push(NodeData {
                 ins: new_node_inputs,
-                outs: vec![OutData::default(); data.sig().outs_len()],
-                data,
+                outs: vec![OutData::default(); kind.sig().outs_len()],
+                kind,
             });
 
             assert_eq!(self.node_data(node_id).ins.len(), sig.ins_len());
@@ -198,11 +228,11 @@ impl<S> NodeCtxt<S> {
         };
 
         let node_term = NodeTerm {
-            data: data.clone(),
+            kind: kind.clone(),
             origins: origins.into(),
         };
 
-        let node_hash = self.hash_node_terms(&data, origins);
+        let node_hash = self.hash_node_terms(&kind, origins);
         let mut interned_nodes = self.interned_nodes.borrow_mut();
         let entry = interned_nodes
             .raw_entry_mut()
@@ -211,29 +241,29 @@ impl<S> NodeCtxt<S> {
         match entry {
             RawEntryMut::Occupied(e) => *e.get(),
             RawEntryMut::Vacant(e) => {
-                let node_id = create_node(data, origins);
+                let node_id = create_node(kind, origins);
                 e.insert_hashed_nocheck(node_hash, node_term, node_id);
                 node_id
             }
         }
     }
 
-    fn mk_node(&self, data: S) -> Node<S>
+    fn mk_node(&self, op: S) -> Node<S>
     where
         S: Sig + Eq + Hash + Clone,
     {
-        let node_id = self.mk_node_with(data, &[]);
+        let node_id = self.mk_node_with(NodeKind::Op(op), &[]);
         Node {
             ctxt: self,
             id: node_id,
         }
     }
 
-    fn node_builder(&self, data: S) -> NodeBuilder<S>
+    fn node_builder(&self, op: S) -> NodeBuilder<S>
     where
         S: Sig,
     {
-        NodeBuilder::new(self, data)
+        NodeBuilder::new(self, NodeKind::Op(op))
     }
 
     fn node_ref(&self, node_id: NodeId) -> Node<S> {
@@ -269,30 +299,30 @@ impl<S> PartialEq for NodeCtxt<S> {
 
 struct NodeBuilder<'g, S> {
     ctxt: &'g NodeCtxt<S>,
-    node_metadata: S,
+    node_kind: NodeKind<S>,
     val_origins: Vec<ValOut<'g, S>>,
     st_origins: Vec<StOut<'g, S>>,
 }
 
 impl<'g, S: Sig> NodeBuilder<'g, S> {
-    fn new(ctxt: &'g NodeCtxt<S>, node_metadata: S) -> NodeBuilder<'g, S> {
-        let sig = node_metadata.sig();
+    fn new(ctxt: &'g NodeCtxt<S>, node_kind: NodeKind<S>) -> NodeBuilder<'g, S> {
+        let sig = node_kind.sig();
         NodeBuilder {
             ctxt,
-            node_metadata,
+            node_kind,
             val_origins: Vec::with_capacity(sig.val_ins),
             st_origins: Vec::with_capacity(sig.st_ins),
         }
     }
 
     fn with_val(mut self, val_out: ValOut<'g, S>) -> NodeBuilder<S> {
-        assert!(self.val_origins.len() < self.node_metadata.sig().val_ins);
+        assert!(self.val_origins.len() < self.node_kind.sig().val_ins);
         self.val_origins.push(val_out);
         self
     }
 
     fn with_state(mut self, st_out: StOut<'g, S>) -> NodeBuilder<S> {
-        assert!(self.st_origins.len() < self.node_metadata.sig().st_ins);
+        assert!(self.st_origins.len() < self.node_kind.sig().st_ins);
         self.st_origins.push(st_out);
         self
     }
@@ -301,7 +331,7 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
     where
         S: Eq + Hash + Clone,
     {
-        let sig = self.node_metadata.sig();
+        let sig = self.node_kind.sig();
         assert_eq!(self.val_origins.len(), sig.val_ins);
         assert_eq!(self.st_origins.len(), sig.st_ins);
 
@@ -313,7 +343,7 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
 
         assert_eq!(origins.len(), sig.val_ins + sig.st_ins);
 
-        let node_id = self.ctxt.mk_node_with(self.node_metadata, &origins);
+        let node_id = self.ctxt.mk_node_with(self.node_kind, &origins);
 
         Node {
             ctxt: self.ctxt,
@@ -330,7 +360,7 @@ struct Node<'g, S> {
 
 impl<'g, S: fmt::Debug> fmt::Debug for Node<'g, S> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self.data().data)
+        write!(f, "{:?}", self.data().kind)
     }
 }
 
@@ -486,7 +516,7 @@ impl<'g, S> StOut<'g, S> {
 
 #[cfg(test)]
 mod test {
-    use super::{NodeCtxt, OutId, Sig, SigS};
+    use super::{NodeCtxt, NodeKind, OutId, Sig, SigS};
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum TestData {
@@ -531,7 +561,7 @@ mod test {
     #[test]
     fn create_single_node() {
         let ncx = NodeCtxt::new();
-        let n0 = ncx.mk_node_with(TestData::Lit(0), &[]);
+        let n0 = ncx.mk_node_with(NodeKind::Op(TestData::Lit(0)), &[]);
         assert_eq!(0, ncx.node_data(n0).ins.len());
         assert_eq!(1, ncx.node_data(n0).outs.len());
     }
@@ -539,8 +569,8 @@ mod test {
     #[test]
     fn create_node_with_an_input() {
         let ncx = NodeCtxt::new();
-        let n0 = ncx.mk_node_with(TestData::Lit(0), &[]);
-        let n1 = ncx.mk_node_with(TestData::Neg, &[OutId { node: n0, index: 0 }]);
+        let n0 = ncx.mk_node_with(NodeKind::Op(TestData::Lit(0)), &[]);
+        let n1 = ncx.mk_node_with(NodeKind::Op(TestData::Neg), &[OutId { node: n0, index: 0 }]);
 
         assert_eq!(n0, ncx.node_data(n1).ins[0].origin.node);
     }
@@ -563,18 +593,18 @@ mod test {
     fn create_node_with_input_ports() {
         let ncx = NodeCtxt::new();
 
-        let n0 = ncx.mk_node_with(TestData::Lit(2), &[]);
+        let n0 = ncx.mk_node_with(NodeKind::Op(TestData::Lit(2)), &[]);
 
         assert_eq!(0, ncx.node_data(n0).ins.len());
         assert_eq!(1, ncx.node_data(n0).outs.len());
 
-        let n1 = ncx.mk_node_with(TestData::Lit(3), &[]);
+        let n1 = ncx.mk_node_with(NodeKind::Op(TestData::Lit(3)), &[]);
 
         assert_eq!(0, ncx.node_data(n1).ins.len());
         assert_eq!(1, ncx.node_data(n1).outs.len());
 
         let n2 = ncx.mk_node_with(
-            TestData::BinAdd,
+            NodeKind::Op(TestData::BinAdd),
             &[OutId { node: n0, index: 0 }, OutId { node: n1, index: 0 }],
         );
 

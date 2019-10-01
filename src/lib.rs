@@ -57,6 +57,24 @@ struct NodeData<S> {
     kind: NodeKind<S>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct RegionId(usize);
+
+struct ArgData {
+
+}
+
+struct ResData {
+
+}
+
+struct RegionData {
+    args: Vec<ArgData>,
+    res: Vec<ResData>,
+    next_region: Option<RegionId>,
+    prev_region: Option<RegionId>,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 struct SigS {
     val_ins: usize,
@@ -315,7 +333,7 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
         }
     }
 
-    fn with_val(mut self, val_out: ValOut<'g, S>) -> NodeBuilder<S> {
+    fn connect(mut self, val_out: ValOut<'g, S>) -> NodeBuilder<S> {
         assert!(self.val_origins.len() < self.node_kind.sig().val_ins);
         self.val_origins.push(val_out);
         self
@@ -525,6 +543,9 @@ mod test {
         St,
         BinAdd,
         LoadOffset,
+        OpA,
+        OpB,
+        OpC,
     }
 
     impl Sig for TestData {
@@ -534,7 +555,7 @@ mod test {
                     val_outs: 1,
                     ..SigS::default()
                 },
-                TestData::Neg => SigS {
+                TestData::Neg | TestData::OpA | TestData::OpB | TestData::OpC => SigS {
                     val_ins: 1,
                     val_outs: 1,
                     ..SigS::default()
@@ -582,7 +603,7 @@ mod test {
         let n0 = ncx.mk_node(TestData::Lit(0));
         let n1 = ncx
             .node_builder(TestData::Neg)
-            .with_val(n0.val_out(0))
+            .connect(n0.val_out(0))
             .finish();
 
         assert_eq!(n0.id, n1.data().ins[0].origin.node);
@@ -624,7 +645,7 @@ mod test {
     }
 
     #[test]
-    fn create_node_with_values_and_states_using_builder() {
+    fn create_node_connectues_and_states_using_builder() {
         let ncx = NodeCtxt::new();
 
         let n0 = ncx.mk_node(TestData::Lit(2));
@@ -633,14 +654,41 @@ mod test {
 
         let n3 = ncx
             .node_builder(TestData::LoadOffset)
-            .with_val(n0.val_out(0))
-            .with_val(n1.val_out(0))
+            .connect(n0.val_out(0))
+            .connect(n1.val_out(0))
             .with_state(n2.st_out(0))
             .finish();
 
         assert_eq!(n0.val_out(0), n3.val_in(0).origin());
         assert_eq!(n1.val_out(0), n3.val_in(1).origin());
         assert_eq!(n2.st_out(0), n3.st_in(0).origin());
+    }
+
+    #[test]
+    fn users_iterator() {
+        let ncx = NodeCtxt::new();
+
+        let n0 = ncx.mk_node(TestData::Lit(0));
+
+
+        let n1 = ncx.node_builder(TestData::OpA)
+            .connect(n0.val_out(0))
+            .finish();
+
+        let n2 = ncx.node_builder(TestData::OpB)
+            .connect(n0.val_out(0))
+            .finish();
+
+        let n3 = ncx.node_builder(TestData::OpC)
+            .connect(n0.val_out(0))
+            .finish();
+
+        let mut users = n0.val_out(0).users();
+
+        assert_eq!(Some(n1.val_in(0)), users.next());
+        assert_eq!(Some(n2.val_in(0)), users.next());
+        assert_eq!(Some(n3.val_in(0)), users.next());
+        assert_eq!(None, users.next());
     }
 
     #[test]
@@ -657,20 +705,20 @@ mod test {
 
         let n3 = ncx
             .node_builder(TestData::BinAdd)
-            .with_val(n0.val_out(0))
-            .with_val(n1.val_out(0))
+            .connect(n0.val_out(0))
+            .connect(n1.val_out(0))
             .finish();
 
         let n4 = ncx
             .node_builder(TestData::BinAdd)
-            .with_val(n0.val_out(0))
-            .with_val(n2.val_out(0))
+            .connect(n0.val_out(0))
+            .connect(n2.val_out(0))
             .finish();
 
         let n5 = ncx
             .node_builder(TestData::BinAdd)
-            .with_val(n2.val_out(0))
-            .with_val(n1.val_out(0))
+            .connect(n2.val_out(0))
+            .connect(n1.val_out(0))
             .finish();
 
         assert_ne!(n3.id, n4.id);

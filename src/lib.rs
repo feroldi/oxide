@@ -49,25 +49,45 @@ enum NodeKind<S> {
         region_val_res: usize,
         region_st_res: usize,
     },
+    Gamma {
+        val_ins: usize,
+        val_outs: usize,
+        st_ins: usize,
+        st_outs: usize,
+    },
 }
 
 struct NodeData<S> {
     ins: Vec<InData>,
     outs: Vec<OutData>,
-    // owned_region: Option<RegionId>,
+    inner_regions: Option<InnerRegionList>,
+    outer_region: RegionId,
     kind: NodeKind<S>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct RegionId(usize);
 
-struct ArgData {}
+struct InnerRegionList {
+    first_region: RegionId,
+    last_region: RegionId,
+}
 
-struct ResData {}
+struct ArgData {
+    input: InId,
+    users: Cell<Option<UserList>>,
+}
+
+struct ResData {
+    result_from: OutId,
+    mapped_to: OutId,
+}
 
 struct RegionData {
     args: Vec<ArgData>,
     res: Vec<ResData>,
+    prev_region: Cell<Option<RegionId>>,
+    next_region: Cell<Option<RegionId>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
@@ -113,6 +133,19 @@ impl<S: Sig> Sig for NodeKind<S> {
                 val_outs: region_val_res,
                 st_outs: region_st_res,
             },
+            &NodeKind::Gamma {
+                val_ins,
+                val_outs,
+                st_ins,
+                st_outs,
+            } => {
+                SigS {
+                    val_ins: 1 + val_ins, // predicate + inputs
+                    val_outs,
+                    st_ins,
+                    st_outs,
+                }
+            }
         }
     }
 }
@@ -231,6 +264,9 @@ impl<S> NodeCtxt<S> {
             self.nodes.borrow_mut().push(NodeData {
                 ins: new_node_inputs,
                 outs: vec![OutData::default(); kind.sig().outs_len()],
+                inner_regions: None,
+                // FIXME replace with an argument from mk_node_with.
+                outer_region: RegionId(0),
                 kind,
             });
 

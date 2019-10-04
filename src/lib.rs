@@ -8,36 +8,66 @@ use std::{
     ptr,
 };
 
+/// An index for a NodeData in a NodeCtxt.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct NodeId(usize);
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct InId {
-    node: NodeId,
-    index: usize,
-}
-
+/// An index for a RegionData in a NodeCtxt.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct OutId {
-    node: NodeId,
-    index: usize,
-}
+struct RegionId(usize);
 
-struct InData {
-    origin: OutId,
-    prev_user: Cell<Option<InId>>,
-    next_user: Cell<Option<InId>>,
-}
-
-#[derive(Clone, Default, Debug)]
-struct OutData {
-    users: Cell<Option<UserList>>,
-}
-
+/// An index for a UserData of an input or result port.
 #[derive(Clone, Copy, PartialEq, Debug)]
-struct UserList {
-    first: InId,
-    last: InId,
+enum UserId {
+    In { node: NodeId, index: usize },
+    Res { region: RegionId, index: usize },
+}
+
+impl UserId {
+    fn node(&self) -> Option<NodeId> {
+        match self {
+            &UserId::In { node, .. } => Some(node),
+            _ => None,
+        }
+    }
+}
+
+/// An index for an OriginData of an output or argument port.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum OriginId {
+    Out { node: NodeId, index: usize },
+    Arg { region: RegionId, index: usize },
+}
+
+impl OriginId {
+    fn node(&self) -> Option<NodeId> {
+        match self {
+            &OriginId::Out { node, .. } => Some(node),
+            _ => None,
+        }
+    }
+}
+
+/// A UserData contains information about an input or result port.
+struct UserData {
+    origin: OriginId,
+    sink: Option<OriginId>,
+    prev_user: Cell<Option<UserId>>,
+    next_user: Cell<Option<UserId>>,
+}
+
+/// An OriginData contains information about an output or argument port.
+#[derive(Clone, Default, Debug)]
+struct OriginData {
+    source: Option<UserId>,
+    users: Cell<Option<UserIdList>>,
+}
+
+/// A linked list of users connected to a common origin.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct UserIdList {
+    first: UserId,
+    last: UserId,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -58,34 +88,21 @@ enum NodeKind<S> {
 }
 
 struct NodeData<S> {
-    ins: Vec<InData>,
-    outs: Vec<OutData>,
+    ins: Vec<UserData>,
+    outs: Vec<OriginData>,
     inner_regions: Option<InnerRegionList>,
     outer_region: RegionId,
     kind: NodeKind<S>,
 }
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct RegionId(usize);
 
 struct InnerRegionList {
     first_region: RegionId,
     last_region: RegionId,
 }
 
-struct ArgData {
-    input: InId,
-    users: Cell<Option<UserList>>,
-}
-
-struct ResData {
-    result_from: OutId,
-    mapped_to: OutId,
-}
-
 struct RegionData {
-    args: Vec<ArgData>,
-    res: Vec<ResData>,
+    res: Vec<UserData>,
+    args: Vec<OriginData>,
     prev_region: Cell<Option<RegionId>>,
     next_region: Cell<Option<RegionId>>,
 }
@@ -152,7 +169,7 @@ impl<S: Sig> Sig for NodeKind<S> {
 
 struct NodeTerm<S> {
     kind: NodeKind<S>,
-    origins: Vec<OutId>,
+    origins: Vec<OriginId>,
 }
 
 impl<S: PartialEq> PartialEq for NodeTerm<S> {
@@ -172,6 +189,7 @@ impl<S: Hash> Hash for NodeTerm<S> {
 
 struct NodeCtxt<S> {
     nodes: RefCell<Vec<NodeData<S>>>,
+    regions: RefCell<Vec<RegionData>>,
     interned_nodes: RefCell<HashMap<NodeTerm<S>, NodeId>>,
 }
 
@@ -182,6 +200,7 @@ impl<S> NodeCtxt<S> {
     {
         NodeCtxt {
             nodes: RefCell::new(vec![]),
+            regions: RefCell::new(vec![]),
             interned_nodes: RefCell::default(),
         }
     }
@@ -190,54 +209,75 @@ impl<S> NodeCtxt<S> {
         Ref::map(self.nodes.borrow(), |nodes| &nodes[id.0])
     }
 
-    fn in_data(&self, id: InId) -> Ref<InData> {
-        Ref::map(self.node_data(id.node), |data| &data.ins[id.index])
+    fn region_data(&self, id: RegionId) -> Ref<RegionData> {
+        Ref::map(self.regions.borrow(), |regions| &regions[id.0])
     }
 
-    fn out_data(&self, id: OutId) -> Ref<OutData> {
-        Ref::map(self.node_data(id.node), |data| &data.outs[id.index])
+    fn user_data(&self, user_id: UserId) -> Ref<UserData> {
+        match user_id {
+            UserId::In { node, index } => {
+                Ref::map(self.node_data(node), |node_data| &node_data.ins[index])
+            }
+            UserId::Res { region, index } => Ref::map(self.region_data(region), |region_data| {
+                &region_data.res[index]
+            }),
+        }
     }
 
-    fn hash_node_terms(&self, kind: &NodeKind<S>, origins: &[OutId]) -> u64
+    fn origin_data(&self, origin_id: OriginId) -> Ref<OriginData> {
+        match origin_id {
+            OriginId::Out { node, index } => {
+                Ref::map(self.node_data(node), |node_data| &node_data.outs[index])
+            }
+            OriginId::Arg { region, index } => Ref::map(self.region_data(region), |region_data| {
+                &region_data.args[index]
+            }),
+        }
+    }
+
+    fn hash_node_terms(&self, node_kind: &NodeKind<S>, origins: &[OriginId]) -> u64
     where
         S: Eq + Hash,
     {
         let mut hasher = self.interned_nodes.borrow().hasher().build_hasher();
-        kind.hash(&mut hasher);
+        node_kind.hash(&mut hasher);
         origins.hash(&mut hasher);
         hasher.finish()
     }
 
-    fn mk_node_with(&self, kind: NodeKind<S>, origins: &[OutId]) -> NodeId
+    fn mk_node_with(&self, kind: NodeKind<S>, origins: &[OriginId]) -> NodeId
     where
         S: Sig + Eq + Hash + Clone,
     {
         assert_eq!(kind.sig().ins_len(), origins.len());
 
-        let create_node = |kind: NodeKind<S>, origins: &[OutId]| {
+        let create_node = |kind: NodeKind<S>, origins: &[OriginId]| {
             // Node creation works as follows:
-            // 1. Create the InData sequence, operanding sinks as you go.
+            // 1. Create the UserData sequence, operanding sinks as you go.
             // 2. Initialize the OutData sequence with empty users.
             // 3. Push the new node to the node context and return its id.
 
             // Input ports are put into this vector so the node creation comes down to just
             // a push into the `self.nodes`.
-            let mut new_node_inputs = Vec::<InData>::with_capacity(kind.sig().ins_len());
+            let mut new_node_inputs = Vec::<UserData>::with_capacity(kind.sig().ins_len());
             let node_id = NodeId(self.nodes.borrow().len());
 
             for (i, &origin) in origins.iter().enumerate() {
-                let new_in_id = InId {
+                let new_in_id = UserId::In {
                     node: node_id,
                     index: i,
                 };
-                let (prev_user, new_user_list) = match self.out_data(origin).users.get() {
-                    Some(UserList { first, last }) => {
-                        if last.node == node_id {
-                            new_node_inputs[last.index].next_user.set(Some(new_in_id));
-                        } else {
-                            self.in_data(last).next_user.set(Some(new_in_id));
+                let (prev_user, new_user_list) = match self.origin_data(origin).users.get() {
+                    Some(UserIdList { first, last }) => {
+                        match last {
+                            UserId::In { node, index } if node == node_id => {
+                                new_node_inputs[index].next_user.set(Some(new_in_id));
+                            }
+                            _ => {
+                                self.user_data(last).next_user.set(Some(new_in_id));
+                            }
                         }
-                        let new_user_list = UserList {
+                        let new_user_list = UserIdList {
                             first,
                             last: new_in_id,
                         };
@@ -245,15 +285,16 @@ impl<S> NodeCtxt<S> {
                     }
                     None => (
                         None, // No previous user.
-                        UserList {
+                        UserIdList {
                             first: new_in_id,
                             last: new_in_id,
                         },
                     ),
                 };
-                self.out_data(origin).users.set(Some(new_user_list));
-                new_node_inputs.push(InData {
+                self.origin_data(origin).users.set(Some(new_user_list));
+                new_node_inputs.push(UserData {
                     origin,
+                    sink: None,
                     prev_user: Cell::new(prev_user),
                     next_user: Cell::default(),
                 });
@@ -263,7 +304,7 @@ impl<S> NodeCtxt<S> {
 
             self.nodes.borrow_mut().push(NodeData {
                 ins: new_node_inputs,
-                outs: vec![OutData::default(); kind.sig().outs_len()],
+                outs: vec![OriginData::default(); kind.sig().outs_len()],
                 inner_regions: None,
                 // FIXME replace with an argument from mk_node_with.
                 outer_region: RegionId(0),
@@ -323,19 +364,27 @@ impl<S> NodeCtxt<S> {
         }
     }
 
-    fn in_ref(&self, in_id: InId) -> In<S> {
-        assert!(in_id.index < self.node_data(in_id.node).ins.len());
-        In {
-            node: self.node_ref(in_id.node),
-            port: in_id.index,
+    fn user_ref<'g>(&'g self, user_id: UserId) -> User<'g, S> {
+        match user_id {
+            UserId::In { node, index } => assert!(index < self.node_data(node).ins.len()),
+            UserId::Res { region, index } => assert!(index < self.region_data(region).res.len()),
+        }
+
+        User {
+            ctxt: self,
+            user_id,
         }
     }
 
-    fn out_ref(&self, out_id: OutId) -> Out<S> {
-        assert!(out_id.index < self.node_data(out_id.node).outs.len());
-        Out {
-            node: self.node_ref(out_id.node),
-            port: out_id.index,
+    fn origin_ref<'g>(&'g self, origin_id: OriginId) -> Origin<'g, S> {
+        match origin_id {
+            OriginId::Out { node, index } => assert!(index < self.node_data(node).outs.len()),
+            OriginId::Arg { region, index } => assert!(index < self.region_data(region).args.len()),
+        }
+
+        Origin {
+            ctxt: self,
+            origin_id,
         }
     }
 }
@@ -349,8 +398,8 @@ impl<S> PartialEq for NodeCtxt<S> {
 struct NodeBuilder<'g, S> {
     ctxt: &'g NodeCtxt<S>,
     node_kind: NodeKind<S>,
-    val_origins: Vec<ValOut<'g, S>>,
-    st_origins: Vec<StOut<'g, S>>,
+    val_origins: Vec<ValOrigin<'g, S>>,
+    st_origins: Vec<StOrigin<'g, S>>,
 }
 
 impl<'g, S: Sig> NodeBuilder<'g, S> {
@@ -364,35 +413,35 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
         }
     }
 
-    fn operand(mut self, val_out: ValOut<'g, S>) -> NodeBuilder<'g, S> {
+    fn operand(mut self, val_origin: ValOrigin<'g, S>) -> NodeBuilder<'g, S> {
         assert!(self.val_origins.len() < self.node_kind.sig().val_ins);
-        self.val_origins.push(val_out);
+        self.val_origins.push(val_origin);
         self
     }
 
-    fn operands(mut self, val_outs: &[ValOut<'g, S>]) -> NodeBuilder<'g, S>
+    fn operands(mut self, val_origins: &[ValOrigin<'g, S>]) -> NodeBuilder<'g, S>
     where
         S: Clone,
     {
         assert!(self.val_origins.is_empty());
-        assert_eq!(self.node_kind.sig().val_ins, val_outs.len());
-        self.val_origins.extend(val_outs.iter().cloned());
+        assert_eq!(self.node_kind.sig().val_ins, val_origins.len());
+        self.val_origins.extend(val_origins.iter().cloned());
         self
     }
 
-    fn state(mut self, st_out: StOut<'g, S>) -> NodeBuilder<'g, S> {
+    fn state(mut self, st_origin: StOrigin<'g, S>) -> NodeBuilder<'g, S> {
         assert!(self.st_origins.len() < self.node_kind.sig().st_ins);
-        self.st_origins.push(st_out);
+        self.st_origins.push(st_origin);
         self
     }
 
-    fn states(mut self, st_outs: &[StOut<'g, S>]) -> NodeBuilder<'g, S>
+    fn states(mut self, st_origins: &[StOrigin<'g, S>]) -> NodeBuilder<'g, S>
     where
         S: Clone,
     {
         assert!(self.st_origins.is_empty());
-        assert_eq!(self.node_kind.sig().st_ins, st_outs.len());
-        self.st_origins.extend(st_outs.iter().cloned());
+        assert_eq!(self.node_kind.sig().st_ins, st_origins.len());
+        self.st_origins.extend(st_origins.iter().cloned());
         self
     }
 
@@ -404,9 +453,9 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
         assert_eq!(self.val_origins.len(), sig.val_ins);
         assert_eq!(self.st_origins.len(), sig.st_ins);
 
-        let origins: Vec<OutId> = {
-            let val_origins = self.val_origins.iter().map(|val_out| val_out.0.id());
-            let st_origins = self.st_origins.iter().map(|st_out| st_out.0.id());
+        let origins: Vec<OriginId> = {
+            let val_origins = self.val_origins.iter().map(|val_origin| val_origin.0.id());
+            let st_origins = self.st_origins.iter().map(|st_origin| st_origin.0.id());
             val_origins.chain(st_origins).collect()
         };
 
@@ -440,104 +489,116 @@ impl<'g, S> Node<'g, S> {
 }
 
 impl<'g, S: Sig + Copy> Node<'g, S> {
-    fn val_in(&self, port: usize) -> ValIn<'g, S> {
+    fn val_in(&self, port: usize) -> ValUser<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.val_ins);
-        ValIn(In { node: *self, port })
+        ValUser(self.ctxt.user_ref(UserId::In {
+            node: self.id,
+            index: port,
+        }))
     }
 
-    fn val_out(&self, port: usize) -> ValOut<'g, S> {
+    fn val_out(&self, port: usize) -> ValOrigin<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.val_outs);
-        ValOut(Out { node: *self, port })
+        ValOrigin(self.ctxt.origin_ref(OriginId::Out {
+            node: self.id,
+            index: port,
+        }))
     }
 
-    fn st_in(&self, port: usize) -> StIn<'g, S> {
+    fn st_in(&self, port: usize) -> StUser<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.st_ins);
-        StIn(In {
-            node: *self,
-            port: sig.val_ins + port,
-        })
+        StUser(self.ctxt.user_ref(UserId::In {
+            node: self.id,
+            index: sig.val_ins + port,
+        }))
     }
 
-    fn st_out(&self, port: usize) -> StOut<'g, S> {
+    fn st_out(&self, port: usize) -> StOrigin<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.st_outs);
-        StOut(Out {
-            node: *self,
-            port: sig.val_outs + port,
-        })
+        StOrigin(self.ctxt.origin_ref(OriginId::Out {
+            node: self.id,
+            index: sig.val_outs + port,
+        }))
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
-struct In<'g, S> {
-    node: Node<'g, S>,
-    port: usize,
+#[derive(Copy, Clone, PartialEq)]
+struct User<'g, S> {
+    ctxt: &'g NodeCtxt<S>,
+    user_id: UserId,
 }
 
-impl<'g, S> In<'g, S> {
-    fn id(&self) -> InId {
-        InId {
-            node: self.node.id,
-            index: self.port,
-        }
-    }
-
-    fn data(&self) -> Ref<'g, InData> {
-        self.node.ctxt.in_data(self.id())
-    }
-
-    fn origin(&self) -> Out<'g, S> {
-        let origin = self.data().origin;
-        self.node.ctxt.out_ref(origin)
+impl<'g, S: fmt::Debug> fmt::Debug for User<'g, S> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self.user_id)
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
-struct Out<'g, S> {
-    node: Node<'g, S>,
-    port: usize,
-}
-
-impl<'g, S> Out<'g, S> {
-    fn id(&self) -> OutId {
-        OutId {
-            node: self.node.id,
-            index: self.port,
-        }
+impl<'g, S> User<'g, S> {
+    fn id(&self) -> UserId {
+        self.user_id
     }
 
-    fn data(&self) -> Ref<'g, OutData> {
-        self.node.ctxt.out_data(self.id())
+    fn data(&self) -> Ref<'g, UserData> {
+        self.ctxt.user_data(self.user_id)
+    }
+
+    fn origin(&self) -> Origin<'g, S> {
+        let origin_id = self.data().origin;
+        self.ctxt.origin_ref(origin_id)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq)]
+struct Origin<'g, S> {
+    ctxt: &'g NodeCtxt<S>,
+    origin_id: OriginId,
+}
+
+impl<'g, S: fmt::Debug> fmt::Debug for Origin<'g, S> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self.origin_id)
+    }
+}
+
+impl<'g, S> Origin<'g, S> {
+    fn id(&self) -> OriginId {
+        self.origin_id
+    }
+
+    fn data(&self) -> Ref<'g, OriginData> {
+        self.ctxt.origin_data(self.origin_id)
     }
 
     fn users(&self) -> Users<'g, S> {
-        let in_ref = |in_id| self.node.ctxt.in_ref(in_id);
+        let user_ref = |user_id| self.ctxt.user_ref(user_id);
         Users {
             first_and_last: self
                 .data()
                 .users
                 .get()
-                .map(|users| (in_ref(users.first), in_ref(users.last))),
+                .map(|users| (user_ref(users.first), user_ref(users.last))),
         }
     }
 }
 
 struct Users<'g, S> {
-    first_and_last: Option<(In<'g, S>, In<'g, S>)>,
+    first_and_last: Option<(User<'g, S>, User<'g, S>)>,
 }
 
 impl<'g, S> Iterator for Users<'g, S> {
-    type Item = In<'g, S>;
+    type Item = User<'g, S>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.first_and_last.take() {
             Some((first, last)) => {
                 if first.id() != last.id() {
                     if let Some(next_user) = first.data().next_user.get() {
-                        self.first_and_last = Some((first.node.ctxt.in_ref(next_user), last));
+                        self.first_and_last = Some((first.ctxt.user_ref(next_user), last));
                     }
                 }
                 Some(first)
@@ -548,44 +609,44 @@ impl<'g, S> Iterator for Users<'g, S> {
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-struct ValIn<'g, S>(In<'g, S>);
+struct ValUser<'g, S>(User<'g, S>);
 
-impl<'g, S> ValIn<'g, S> {
-    fn origin(&self) -> ValOut<'g, S> {
-        ValOut(self.0.origin())
+impl<'g, S> ValUser<'g, S> {
+    fn origin(&self) -> ValOrigin<'g, S> {
+        ValOrigin(self.0.origin())
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-struct StIn<'g, S>(In<'g, S>);
+struct StUser<'g, S>(User<'g, S>);
 
-impl<'g, S> StIn<'g, S> {
-    fn origin(&self) -> StOut<'g, S> {
-        StOut(self.0.origin())
+impl<'g, S> StUser<'g, S> {
+    fn origin(&self) -> StOrigin<'g, S> {
+        StOrigin(self.0.origin())
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-struct ValOut<'g, S>(Out<'g, S>);
+struct ValOrigin<'g, S>(Origin<'g, S>);
 
-impl<'g, S> ValOut<'g, S> {
-    fn users(&self) -> impl Iterator<Item = ValIn<'g, S>> {
-        self.0.users().map(ValIn)
+impl<'g, S> ValOrigin<'g, S> {
+    fn users(&self) -> impl Iterator<Item = ValUser<'g, S>> {
+        self.0.users().map(ValUser)
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-struct StOut<'g, S>(Out<'g, S>);
+struct StOrigin<'g, S>(Origin<'g, S>);
 
-impl<'g, S> StOut<'g, S> {
-    fn users(&self) -> impl Iterator<Item = StIn<'g, S>> {
-        self.0.users().map(StIn)
+impl<'g, S> StOrigin<'g, S> {
+    fn users(&self) -> impl Iterator<Item = StUser<'g, S>> {
+        self.0.users().map(StUser)
     }
 }
 
 #[cfg(test)]
 mod test {
-    use super::{NodeCtxt, NodeKind, OutId, Sig, SigS};
+    use super::{NodeCtxt, NodeKind, OriginId, Sig, SigS};
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum TestData {
@@ -642,9 +703,12 @@ mod test {
     fn create_node_with_an_input() {
         let ncx = NodeCtxt::new();
         let n0 = ncx.mk_node_with(NodeKind::Op(TestData::Lit(0)), &[]);
-        let n1 = ncx.mk_node_with(NodeKind::Op(TestData::Neg), &[OutId { node: n0, index: 0 }]);
+        let n1 = ncx.mk_node_with(
+            NodeKind::Op(TestData::Neg),
+            &[OriginId::Out { node: n0, index: 0 }],
+        );
 
-        assert_eq!(n0, ncx.node_data(n1).ins[0].origin.node);
+        assert_eq!(Some(n0), ncx.node_data(n1).ins[0].origin.node());
     }
 
     #[test]
@@ -657,7 +721,7 @@ mod test {
             .operand(n0.val_out(0))
             .finish();
 
-        assert_eq!(n0.id, n1.data().ins[0].origin.node);
+        assert_eq!(Some(n0.id), n1.data().ins[0].origin.node());
         assert_eq!(n0.val_out(0), n1.val_in(0).origin());
     }
 
@@ -677,22 +741,31 @@ mod test {
 
         let n2 = ncx.mk_node_with(
             NodeKind::Op(TestData::BinAdd),
-            &[OutId { node: n0, index: 0 }, OutId { node: n1, index: 0 }],
+            &[
+                OriginId::Out { node: n0, index: 0 },
+                OriginId::Out { node: n1, index: 0 },
+            ],
         );
 
         assert_eq!(2, ncx.node_data(n2).ins.len());
         assert_eq!(1, ncx.node_data(n2).outs.len());
 
         assert_eq!(
-            n2,
-            ncx.node_data(n0).outs[0].users.get().unwrap().first.node
+            Some(n2),
+            ncx.node_data(n0).outs[0].users.get().unwrap().first.node()
         );
-        assert_eq!(n2, ncx.node_data(n0).outs[0].users.get().unwrap().last.node);
         assert_eq!(
-            n2,
-            ncx.node_data(n1).outs[0].users.get().unwrap().first.node
+            Some(n2),
+            ncx.node_data(n0).outs[0].users.get().unwrap().last.node()
         );
-        assert_eq!(n2, ncx.node_data(n1).outs[0].users.get().unwrap().last.node);
+        assert_eq!(
+            Some(n2),
+            ncx.node_data(n1).outs[0].users.get().unwrap().first.node()
+        );
+        assert_eq!(
+            Some(n2),
+            ncx.node_data(n1).outs[0].users.get().unwrap().last.node()
+        );
     }
 
     #[test]

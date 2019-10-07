@@ -3,8 +3,9 @@
 use std::{
     cell::{Cell, Ref, RefCell},
     collections::{hash_map::RawEntryMut, HashMap},
-    fmt,
+    fmt::{self, Debug},
     hash::{BuildHasher, Hash, Hasher},
+    io::{self, Write},
     ptr,
 };
 
@@ -168,13 +169,14 @@ impl<S: Sig> Sig for NodeKind<S> {
 }
 
 struct NodeTerm<S> {
+    region: RegionId,
     kind: NodeKind<S>,
     origins: Vec<OriginId>,
 }
 
 impl<S: PartialEq> PartialEq for NodeTerm<S> {
     fn eq(&self, other: &NodeTerm<S>) -> bool {
-        self.kind == other.kind && self.origins == other.origins
+        self.region == other.region && self.kind == other.kind && self.origins == other.origins
     }
 }
 
@@ -203,6 +205,41 @@ impl<S> NodeCtxt<S> {
             regions: RefCell::new(vec![]),
             interned_nodes: RefCell::default(),
         }
+    }
+
+    fn print(&self, out: &mut dyn Write) -> io::Result<()>
+    where
+        S: Sig + Debug + Copy,
+    {
+        writeln!(out, "digraph rvsdg {{")?;
+        for idx in 0..self.nodes.borrow().len() {
+            let node = self.node_ref(NodeId(idx));
+            match *node.kind() {
+                NodeKind::Op(ref operation) => {
+                    writeln!(out, r#"    {} [label="{:?}"]"#, node.id.0, operation)?;
+                }
+                _ => unimplemented!(),
+            }
+
+            let sig = node.kind().sig();
+
+            for i in 0..sig.val_ins {
+                let origin = node.val_in(i).origin();
+                let origin_node = origin.0.origin_id.node().unwrap().0;
+                writeln!(out, "    {} -> {} [color=blue]", origin_node, node.id.0)?;
+            }
+
+            for i in 0..sig.st_ins {
+                let origin = node.st_in(i).origin();
+                let origin_node = origin.0.origin_id.node().unwrap().0;
+                writeln!(
+                    out,
+                    "    {} -> {} [style=dashed, color=red]",
+                    origin_node, node.id.0
+                )?;
+            }
+        }
+        writeln!(out, "}}")
     }
 
     fn node_data(&self, id: NodeId) -> Ref<NodeData<S>> {
@@ -250,6 +287,8 @@ impl<S> NodeCtxt<S> {
         S: Sig + Eq + Hash + Clone,
     {
         assert_eq!(kind.sig().ins_len(), origins.len());
+
+        let region_id = RegionId(0);
 
         let create_node = |kind: NodeKind<S>, origins: &[OriginId]| {
             // Node creation works as follows:
@@ -307,7 +346,7 @@ impl<S> NodeCtxt<S> {
                 outs: vec![OriginData::default(); kind.sig().outs_len()],
                 inner_regions: None,
                 // FIXME replace with an argument from mk_node_with.
-                outer_region: RegionId(0),
+                outer_region: region_id,
                 kind,
             });
 
@@ -318,6 +357,7 @@ impl<S> NodeCtxt<S> {
         };
 
         let node_term = NodeTerm {
+            region: region_id,
             kind: kind.clone(),
             origins: origins.into(),
         };
@@ -486,6 +526,10 @@ impl<'g, S> Node<'g, S> {
     fn data(&self) -> Ref<'g, NodeData<S>> {
         self.ctxt.node_data(self.id)
     }
+
+    fn kind(&self) -> Ref<'g, NodeKind<S>> {
+        Ref::map(self.ctxt.node_data(self.id), |node_data| &node_data.kind)
+    }
 }
 
 impl<'g, S: Sig + Copy> Node<'g, S> {
@@ -647,6 +691,7 @@ impl<'g, S> StOrigin<'g, S> {
 #[cfg(test)]
 mod test {
     use super::{NodeCtxt, NodeKind, OriginId, Sig, SigS};
+    use std::io;
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum TestData {
@@ -655,6 +700,8 @@ mod test {
         St,
         BinAdd,
         LoadOffset,
+        Load,
+        Store,
         OpA,
         OpB,
         OpC,
@@ -684,6 +731,18 @@ mod test {
                 TestData::LoadOffset => SigS {
                     val_ins: 2,
                     val_outs: 1,
+                    st_ins: 1,
+                    st_outs: 1,
+                },
+                TestData::Load => SigS {
+                    val_ins: 1,
+                    val_outs: 1,
+                    st_ins: 1,
+                    st_outs: 0,
+                },
+                TestData::Store => SigS {
+                    val_ins: 2,
+                    val_outs: 0,
                     st_ins: 1,
                     st_outs: 1,
                 },
@@ -869,5 +928,56 @@ mod test {
         assert_ne!(n3.id, n4.id);
         assert_ne!(n4.id, n5.id);
         assert_eq!(n3.id, n5.id);
+    }
+
+    #[test]
+    fn simple_nodes_from_paper() {
+        let ncx = NodeCtxt::new();
+
+        let n_x = ncx.mk_node(TestData::Lit(100));
+        let n_y = ncx.mk_node(TestData::Lit(104));
+        let n_4 = ncx.mk_node(TestData::Lit(4));
+        let n_5 = ncx.mk_node(TestData::Lit(5));
+        let n_s = ncx.mk_node(TestData::St);
+
+        let n_l1 = ncx
+            .node_builder(TestData::Load)
+            .operand(n_x.val_out(0))
+            .state(n_s.st_out(0))
+            .finish();
+
+        let n_add_4 = ncx
+            .node_builder(TestData::BinAdd)
+            .operand(n_l1.val_out(0))
+            .operand(n_4.val_out(0))
+            .finish();
+
+        let n_store1 = ncx
+            .node_builder(TestData::Store)
+            .operand(n_x.val_out(0))
+            .operand(n_add_4.val_out(0))
+            .state(n_s.st_out(0))
+            .finish();
+
+        let n_l2 = ncx
+            .node_builder(TestData::Load)
+            .operand(n_y.val_out(0))
+            .state(n_store1.st_out(0))
+            .finish();
+
+        let n_add_5 = ncx
+            .node_builder(TestData::BinAdd)
+            .operand(n_l2.val_out(0))
+            .operand(n_5.val_out(0))
+            .finish();
+
+        let n_store2 = ncx
+            .node_builder(TestData::Store)
+            .operand(n_y.val_out(0))
+            .operand(n_add_5.val_out(0))
+            .state(n_store1.st_out(0))
+            .finish();
+
+        ncx.print(&mut io::stdout().lock()).unwrap();
     }
 }

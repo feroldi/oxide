@@ -212,31 +212,69 @@ impl<S> NodeCtxt<S> {
         S: Sig + Debug + Copy,
     {
         writeln!(out, "digraph rvsdg {{")?;
+        writeln!(out, "    node [shape=record];")?;
         for idx in 0..self.nodes.borrow().len() {
             let node = self.node_ref(NodeId(idx));
+            let sig = node.kind().sig();
+
             match *node.kind() {
                 NodeKind::Op(ref operation) => {
-                    writeln!(out, r#"    {} [label="{:?}"]"#, node.id.0, operation)?;
+                    let dot_ins = (0..sig.ins_len())
+                        .map(|i| format!("<i{0}> {0}", i))
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let dot_outs = (0..sig.outs_len())
+                        .map(|i| format!("<o{0}> {0}", i))
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let label_value = vec![dot_ins, format!("{:?}", operation), dot_outs]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("} | {");
+                    let label = format!("{{{{ {} }}}}", label_value);
+                    writeln!(out, r#"    {} [label="{}"]"#, node.id.0, label)?;
                 }
                 _ => unimplemented!(),
             }
 
-            let sig = node.kind().sig();
-
             for i in 0..sig.val_ins {
                 let origin = node.val_in(i).origin();
-                let origin_node = origin.0.origin_id.node().unwrap().0;
-                writeln!(out, "    {} -> {} [color=blue]", origin_node, node.id.0)?;
+                match origin.0.origin_id {
+                    OriginId::Out {
+                        node: origin_node_id,
+                        index,
+                    } => {
+                        let port_origin = index;
+                        let port_user = i;
+                        writeln!(
+                            out,
+                            "    {}:o{} -> {}:i{} [color=blue]",
+                            origin_node_id.0, port_origin, node.id.0, port_user
+                        )?;
+                    }
+                    _ => unimplemented!(),
+                }
             }
 
             for i in 0..sig.st_ins {
                 let origin = node.st_in(i).origin();
                 let origin_node = origin.0.origin_id.node().unwrap().0;
-                writeln!(
-                    out,
-                    "    {} -> {} [style=dashed, color=red]",
-                    origin_node, node.id.0
-                )?;
+                match origin.0.origin_id {
+                    OriginId::Out {
+                        node: origin_node_id,
+                        index,
+                    } => {
+                        let port_origin = index;
+                        let port_user = sig.val_ins + i;
+                        writeln!(
+                            out,
+                            "    {}:o{} -> {}:i{} [style=dashed, color=red]",
+                            origin_node_id.0, port_origin, node.id.0, port_user
+                        )?;
+                    }
+                    _ => unimplemented!(),
+                }
             }
         }
         writeln!(out, "}}")

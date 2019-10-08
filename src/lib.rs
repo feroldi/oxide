@@ -11,21 +11,21 @@ use std::{
 
 /// An index for a NodeData in a NodeCtxt.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct NodeId(usize);
+pub struct NodeId(usize);
 
 /// An index for a RegionData in a NodeCtxt.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct RegionId(usize);
+pub struct RegionId(usize);
 
 /// An index for a UserData of an input or result port.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum UserId {
+pub enum UserId {
     In { node: NodeId, index: usize },
     Res { region: RegionId, index: usize },
 }
 
 impl UserId {
-    fn node(&self) -> Option<NodeId> {
+    pub fn node_id(&self) -> Option<NodeId> {
         match self {
             &UserId::In { node, .. } => Some(node),
             _ => None,
@@ -35,13 +35,13 @@ impl UserId {
 
 /// An index for an OriginData of an output or argument port.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum OriginId {
+pub enum OriginId {
     Out { node: NodeId, index: usize },
     Arg { region: RegionId, index: usize },
 }
 
 impl OriginId {
-    fn node(&self) -> Option<NodeId> {
+    pub fn node_id(&self) -> Option<NodeId> {
         match self {
             &OriginId::Out { node, .. } => Some(node),
             _ => None,
@@ -50,7 +50,7 @@ impl OriginId {
 }
 
 /// A UserData contains information about an input or result port.
-struct UserData {
+pub struct UserData {
     origin: OriginId,
     sink: Option<OriginId>,
     prev_user: Cell<Option<UserId>>,
@@ -59,20 +59,20 @@ struct UserData {
 
 /// An OriginData contains information about an output or argument port.
 #[derive(Clone, Default, Debug)]
-struct OriginData {
+pub struct OriginData {
     source: Option<UserId>,
     users: Cell<Option<UserIdList>>,
 }
 
 /// A linked list of users connected to a common origin.
 #[derive(Clone, Copy, PartialEq, Debug)]
-struct UserIdList {
+pub struct UserIdList {
     first: UserId,
     last: UserId,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum NodeKind<S> {
+pub enum NodeKind<S> {
     Op(S),
     Apply {
         arg_val_ins: usize,
@@ -88,7 +88,7 @@ enum NodeKind<S> {
     },
 }
 
-struct NodeData<S> {
+pub struct NodeData<S> {
     ins: Vec<UserData>,
     outs: Vec<OriginData>,
     inner_regions: Option<InnerRegionList>,
@@ -96,12 +96,12 @@ struct NodeData<S> {
     kind: NodeKind<S>,
 }
 
-struct InnerRegionList {
+pub struct InnerRegionList {
     first_region: RegionId,
     last_region: RegionId,
 }
 
-struct RegionData {
+pub struct RegionData {
     res: Vec<UserData>,
     args: Vec<OriginData>,
     prev_region: Cell<Option<RegionId>>,
@@ -109,7 +109,7 @@ struct RegionData {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
-struct SigS {
+pub struct SigS {
     val_ins: usize,
     val_outs: usize,
     st_ins: usize,
@@ -117,16 +117,16 @@ struct SigS {
 }
 
 impl SigS {
-    fn ins_len(&self) -> usize {
+    pub fn ins_len(&self) -> usize {
         self.val_ins + self.st_ins
     }
 
-    fn outs_len(&self) -> usize {
+    pub fn outs_len(&self) -> usize {
         self.val_outs + self.st_outs
     }
 }
 
-trait Sig {
+pub trait Sig {
     fn sig(&self) -> SigS;
 }
 
@@ -189,14 +189,14 @@ impl<S: Hash> Hash for NodeTerm<S> {
     }
 }
 
-struct NodeCtxt<S> {
+pub struct NodeCtxt<S> {
     nodes: RefCell<Vec<NodeData<S>>>,
     regions: RefCell<Vec<RegionData>>,
     interned_nodes: RefCell<HashMap<NodeTerm<S>, NodeId>>,
 }
 
 impl<S> NodeCtxt<S> {
-    fn new() -> NodeCtxt<S>
+    pub fn new() -> NodeCtxt<S>
     where
         S: Eq + Hash,
     {
@@ -207,7 +207,7 @@ impl<S> NodeCtxt<S> {
         }
     }
 
-    fn print(&self, out: &mut dyn Write) -> io::Result<()>
+    pub fn print(&self, out: &mut dyn Write) -> io::Result<()>
     where
         S: Sig + Debug + Copy,
     {
@@ -260,7 +260,6 @@ impl<S> NodeCtxt<S> {
 
             for i in 0..sig.st_ins {
                 let origin = node.st_in(i).origin();
-                let origin_node = origin.0.origin_id.node().unwrap().0;
                 match origin.0.origin_id {
                     OriginId::Out {
                         node: origin_node_id,
@@ -281,15 +280,15 @@ impl<S> NodeCtxt<S> {
         writeln!(out, "}}")
     }
 
-    fn node_data(&self, id: NodeId) -> Ref<NodeData<S>> {
+    pub fn node_data(&self, id: NodeId) -> Ref<NodeData<S>> {
         Ref::map(self.nodes.borrow(), |nodes| &nodes[id.0])
     }
 
-    fn region_data(&self, id: RegionId) -> Ref<RegionData> {
+    pub fn region_data(&self, id: RegionId) -> Ref<RegionData> {
         Ref::map(self.regions.borrow(), |regions| &regions[id.0])
     }
 
-    fn user_data(&self, user_id: UserId) -> Ref<UserData> {
+    pub fn user_data(&self, user_id: UserId) -> Ref<UserData> {
         match user_id {
             UserId::In { node, index } => {
                 Ref::map(self.node_data(node), |node_data| &node_data.ins[index])
@@ -300,7 +299,7 @@ impl<S> NodeCtxt<S> {
         }
     }
 
-    fn origin_data(&self, origin_id: OriginId) -> Ref<OriginData> {
+    pub fn origin_data(&self, origin_id: OriginId) -> Ref<OriginData> {
         match origin_id {
             OriginId::Out { node, index } => {
                 Ref::map(self.node_data(node), |node_data| &node_data.outs[index])
@@ -417,7 +416,7 @@ impl<S> NodeCtxt<S> {
         }
     }
 
-    fn mk_node(&self, op: S) -> Node<S>
+    pub fn mk_node(&self, op: S) -> Node<S>
     where
         S: Sig + Eq + Hash + Clone,
     {
@@ -428,14 +427,14 @@ impl<S> NodeCtxt<S> {
         }
     }
 
-    fn node_builder(&self, op: S) -> NodeBuilder<S>
+    pub fn node_builder(&self, op: S) -> NodeBuilder<S>
     where
         S: Sig,
     {
         NodeBuilder::new(self, NodeKind::Op(op))
     }
 
-    fn node_ref(&self, node_id: NodeId) -> Node<S> {
+    pub fn node_ref(&self, node_id: NodeId) -> Node<S> {
         assert!(node_id.0 < self.nodes.borrow().len());
         Node {
             ctxt: self,
@@ -443,7 +442,7 @@ impl<S> NodeCtxt<S> {
         }
     }
 
-    fn user_ref<'g>(&'g self, user_id: UserId) -> User<'g, S> {
+    pub fn user_ref<'g>(&'g self, user_id: UserId) -> User<'g, S> {
         match user_id {
             UserId::In { node, index } => assert!(index < self.node_data(node).ins.len()),
             UserId::Res { region, index } => assert!(index < self.region_data(region).res.len()),
@@ -455,7 +454,7 @@ impl<S> NodeCtxt<S> {
         }
     }
 
-    fn origin_ref<'g>(&'g self, origin_id: OriginId) -> Origin<'g, S> {
+    pub fn origin_ref<'g>(&'g self, origin_id: OriginId) -> Origin<'g, S> {
         match origin_id {
             OriginId::Out { node, index } => assert!(index < self.node_data(node).outs.len()),
             OriginId::Arg { region, index } => assert!(index < self.region_data(region).args.len()),
@@ -474,7 +473,7 @@ impl<S> PartialEq for NodeCtxt<S> {
     }
 }
 
-struct NodeBuilder<'g, S> {
+pub struct NodeBuilder<'g, S> {
     ctxt: &'g NodeCtxt<S>,
     node_kind: NodeKind<S>,
     val_origins: Vec<ValOrigin<'g, S>>,
@@ -482,7 +481,7 @@ struct NodeBuilder<'g, S> {
 }
 
 impl<'g, S: Sig> NodeBuilder<'g, S> {
-    fn new(ctxt: &'g NodeCtxt<S>, node_kind: NodeKind<S>) -> NodeBuilder<'g, S> {
+    pub fn new(ctxt: &'g NodeCtxt<S>, node_kind: NodeKind<S>) -> NodeBuilder<'g, S> {
         let sig = node_kind.sig();
         NodeBuilder {
             ctxt,
@@ -492,13 +491,13 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
         }
     }
 
-    fn operand(mut self, val_origin: ValOrigin<'g, S>) -> NodeBuilder<'g, S> {
+    pub fn operand(mut self, val_origin: ValOrigin<'g, S>) -> NodeBuilder<'g, S> {
         assert!(self.val_origins.len() < self.node_kind.sig().val_ins);
         self.val_origins.push(val_origin);
         self
     }
 
-    fn operands(mut self, val_origins: &[ValOrigin<'g, S>]) -> NodeBuilder<'g, S>
+    pub fn operands(mut self, val_origins: &[ValOrigin<'g, S>]) -> NodeBuilder<'g, S>
     where
         S: Clone,
     {
@@ -508,13 +507,13 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
         self
     }
 
-    fn state(mut self, st_origin: StOrigin<'g, S>) -> NodeBuilder<'g, S> {
+    pub fn state(mut self, st_origin: StOrigin<'g, S>) -> NodeBuilder<'g, S> {
         assert!(self.st_origins.len() < self.node_kind.sig().st_ins);
         self.st_origins.push(st_origin);
         self
     }
 
-    fn states(mut self, st_origins: &[StOrigin<'g, S>]) -> NodeBuilder<'g, S>
+    pub fn states(mut self, st_origins: &[StOrigin<'g, S>]) -> NodeBuilder<'g, S>
     where
         S: Clone,
     {
@@ -524,7 +523,7 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
         self
     }
 
-    fn finish(self) -> Node<'g, S>
+    pub fn finish(self) -> Node<'g, S>
     where
         S: Eq + Hash + Clone,
     {
@@ -550,7 +549,7 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-struct Node<'g, S> {
+pub struct Node<'g, S> {
     ctxt: &'g NodeCtxt<S>,
     id: NodeId,
 }
@@ -562,17 +561,17 @@ impl<'g, S: fmt::Debug> fmt::Debug for Node<'g, S> {
 }
 
 impl<'g, S> Node<'g, S> {
-    fn data(&self) -> Ref<'g, NodeData<S>> {
+    pub fn data(&self) -> Ref<'g, NodeData<S>> {
         self.ctxt.node_data(self.id)
     }
 
-    fn kind(&self) -> Ref<'g, NodeKind<S>> {
+    pub fn kind(&self) -> Ref<'g, NodeKind<S>> {
         Ref::map(self.ctxt.node_data(self.id), |node_data| &node_data.kind)
     }
 }
 
 impl<'g, S: Sig + Copy> Node<'g, S> {
-    fn val_in(&self, port: usize) -> ValUser<'g, S> {
+    pub fn val_in(&self, port: usize) -> ValUser<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.val_ins);
         ValUser(self.ctxt.user_ref(UserId::In {
@@ -581,7 +580,7 @@ impl<'g, S: Sig + Copy> Node<'g, S> {
         }))
     }
 
-    fn val_out(&self, port: usize) -> ValOrigin<'g, S> {
+    pub fn val_out(&self, port: usize) -> ValOrigin<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.val_outs);
         ValOrigin(self.ctxt.origin_ref(OriginId::Out {
@@ -590,7 +589,7 @@ impl<'g, S: Sig + Copy> Node<'g, S> {
         }))
     }
 
-    fn st_in(&self, port: usize) -> StUser<'g, S> {
+    pub fn st_in(&self, port: usize) -> StUser<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.st_ins);
         StUser(self.ctxt.user_ref(UserId::In {
@@ -599,7 +598,7 @@ impl<'g, S: Sig + Copy> Node<'g, S> {
         }))
     }
 
-    fn st_out(&self, port: usize) -> StOrigin<'g, S> {
+    pub fn st_out(&self, port: usize) -> StOrigin<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.st_outs);
         StOrigin(self.ctxt.origin_ref(OriginId::Out {
@@ -610,7 +609,7 @@ impl<'g, S: Sig + Copy> Node<'g, S> {
 }
 
 #[derive(Copy, Clone, PartialEq)]
-struct User<'g, S> {
+pub struct User<'g, S> {
     ctxt: &'g NodeCtxt<S>,
     user_id: UserId,
 }
@@ -622,22 +621,22 @@ impl<'g, S: fmt::Debug> fmt::Debug for User<'g, S> {
 }
 
 impl<'g, S> User<'g, S> {
-    fn id(&self) -> UserId {
+    pub fn id(&self) -> UserId {
         self.user_id
     }
 
-    fn data(&self) -> Ref<'g, UserData> {
+    pub fn data(&self) -> Ref<'g, UserData> {
         self.ctxt.user_data(self.user_id)
     }
 
-    fn origin(&self) -> Origin<'g, S> {
+    pub fn origin(&self) -> Origin<'g, S> {
         let origin_id = self.data().origin;
         self.ctxt.origin_ref(origin_id)
     }
 }
 
 #[derive(Copy, Clone, PartialEq)]
-struct Origin<'g, S> {
+pub struct Origin<'g, S> {
     ctxt: &'g NodeCtxt<S>,
     origin_id: OriginId,
 }
@@ -649,15 +648,15 @@ impl<'g, S: fmt::Debug> fmt::Debug for Origin<'g, S> {
 }
 
 impl<'g, S> Origin<'g, S> {
-    fn id(&self) -> OriginId {
+    pub fn id(&self) -> OriginId {
         self.origin_id
     }
 
-    fn data(&self) -> Ref<'g, OriginData> {
+    pub fn data(&self) -> Ref<'g, OriginData> {
         self.ctxt.origin_data(self.origin_id)
     }
 
-    fn users(&self) -> Users<'g, S> {
+    pub fn users(&self) -> Users<'g, S> {
         let user_ref = |user_id| self.ctxt.user_ref(user_id);
         Users {
             first_and_last: self
@@ -669,7 +668,7 @@ impl<'g, S> Origin<'g, S> {
     }
 }
 
-struct Users<'g, S> {
+pub struct Users<'g, S> {
     first_and_last: Option<(User<'g, S>, User<'g, S>)>,
 }
 
@@ -692,37 +691,37 @@ impl<'g, S> Iterator for Users<'g, S> {
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-struct ValUser<'g, S>(User<'g, S>);
+pub struct ValUser<'g, S>(User<'g, S>);
 
 impl<'g, S> ValUser<'g, S> {
-    fn origin(&self) -> ValOrigin<'g, S> {
+    pub fn origin(&self) -> ValOrigin<'g, S> {
         ValOrigin(self.0.origin())
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-struct StUser<'g, S>(User<'g, S>);
+pub struct StUser<'g, S>(User<'g, S>);
 
 impl<'g, S> StUser<'g, S> {
-    fn origin(&self) -> StOrigin<'g, S> {
+    pub fn origin(&self) -> StOrigin<'g, S> {
         StOrigin(self.0.origin())
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-struct ValOrigin<'g, S>(Origin<'g, S>);
+pub struct ValOrigin<'g, S>(Origin<'g, S>);
 
 impl<'g, S> ValOrigin<'g, S> {
-    fn users(&self) -> impl Iterator<Item = ValUser<'g, S>> {
+    pub fn users(&self) -> impl Iterator<Item = ValUser<'g, S>> {
         self.0.users().map(ValUser)
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-struct StOrigin<'g, S>(Origin<'g, S>);
+pub struct StOrigin<'g, S>(Origin<'g, S>);
 
 impl<'g, S> StOrigin<'g, S> {
-    fn users(&self) -> impl Iterator<Item = StUser<'g, S>> {
+    pub fn users(&self) -> impl Iterator<Item = StUser<'g, S>> {
         self.0.users().map(StUser)
     }
 }
@@ -730,7 +729,6 @@ impl<'g, S> StOrigin<'g, S> {
 #[cfg(test)]
 mod test {
     use super::{NodeCtxt, NodeKind, OriginId, Sig, SigS};
-    use std::io;
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum TestData {
@@ -806,7 +804,7 @@ mod test {
             &[OriginId::Out { node: n0, index: 0 }],
         );
 
-        assert_eq!(Some(n0), ncx.node_data(n1).ins[0].origin.node());
+        assert_eq!(Some(n0), ncx.node_data(n1).ins[0].origin.node_id());
     }
 
     #[test]
@@ -819,7 +817,7 @@ mod test {
             .operand(n0.val_out(0))
             .finish();
 
-        assert_eq!(Some(n0.id), n1.data().ins[0].origin.node());
+        assert_eq!(Some(n0.id), n1.data().ins[0].origin.node_id());
         assert_eq!(n0.val_out(0), n1.val_in(0).origin());
     }
 
@@ -850,19 +848,39 @@ mod test {
 
         assert_eq!(
             Some(n2),
-            ncx.node_data(n0).outs[0].users.get().unwrap().first.node()
+            ncx.node_data(n0).outs[0]
+                .users
+                .get()
+                .unwrap()
+                .first
+                .node_id()
         );
         assert_eq!(
             Some(n2),
-            ncx.node_data(n0).outs[0].users.get().unwrap().last.node()
+            ncx.node_data(n0).outs[0]
+                .users
+                .get()
+                .unwrap()
+                .last
+                .node_id()
         );
         assert_eq!(
             Some(n2),
-            ncx.node_data(n1).outs[0].users.get().unwrap().first.node()
+            ncx.node_data(n1).outs[0]
+                .users
+                .get()
+                .unwrap()
+                .first
+                .node_id()
         );
         assert_eq!(
             Some(n2),
-            ncx.node_data(n1).outs[0].users.get().unwrap().last.node()
+            ncx.node_data(n1).outs[0]
+                .users
+                .get()
+                .unwrap()
+                .last
+                .node_id()
         );
     }
 

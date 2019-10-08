@@ -690,6 +690,22 @@ impl<'g, S> Iterator for Users<'g, S> {
     }
 }
 
+impl<'g, S> DoubleEndedIterator for Users<'g, S> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self.first_and_last.take() {
+            Some((first, last)) => {
+                if first.id() != last.id() {
+                    if let Some(prev_user) = last.data().prev_user.get() {
+                        self.first_and_last = Some((first, last.ctxt.user_ref(prev_user)));
+                    }
+                }
+                Some(last)
+            }
+            None => None,
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct ValUser<'g, S>(User<'g, S>);
 
@@ -712,7 +728,7 @@ impl<'g, S> StUser<'g, S> {
 pub struct ValOrigin<'g, S>(Origin<'g, S>);
 
 impl<'g, S> ValOrigin<'g, S> {
-    pub fn users(&self) -> impl Iterator<Item = ValUser<'g, S>> {
+    pub fn users(&self) -> impl DoubleEndedIterator<Item = ValUser<'g, S>> {
         self.0.users().map(ValUser)
     }
 }
@@ -721,7 +737,7 @@ impl<'g, S> ValOrigin<'g, S> {
 pub struct StOrigin<'g, S>(Origin<'g, S>);
 
 impl<'g, S> StOrigin<'g, S> {
-    pub fn users(&self) -> impl Iterator<Item = StUser<'g, S>> {
+    pub fn users(&self) -> impl DoubleEndedIterator<Item = StUser<'g, S>> {
         self.0.users().map(StUser)
     }
 }
@@ -950,6 +966,36 @@ mod test {
         assert_eq!(Some(n2.val_in(0)), users.next());
         assert_eq!(Some(n3.val_in(0)), users.next());
         assert_eq!(None, users.next());
+    }
+
+    #[test]
+    fn users_double_ended_iterator() {
+        let ncx = NodeCtxt::new();
+
+        let n0 = ncx.mk_node(TestData::Lit(0));
+
+        let n1 = ncx
+            .node_builder(TestData::OpA)
+            .operand(n0.val_out(0))
+            .finish();
+
+        let n2 = ncx
+            .node_builder(TestData::OpB)
+            .operand(n0.val_out(0))
+            .finish();
+
+        let n3 = ncx
+            .node_builder(TestData::OpC)
+            .operand(n0.val_out(0))
+            .finish();
+
+        let mut users = n0.val_out(0).users();
+
+        assert_eq!(Some(n1.val_in(0)), users.next());
+        assert_eq!(Some(n3.val_in(0)), users.next_back());
+        assert_eq!(Some(n2.val_in(0)), users.next_back());
+        assert_eq!(None, users.next());
+        assert_eq!(None, users.next_back());
     }
 
     #[test]

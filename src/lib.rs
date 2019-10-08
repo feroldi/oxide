@@ -212,7 +212,8 @@ impl<S> NodeCtxt<S> {
         S: Sig + Debug + Copy,
     {
         writeln!(out, "digraph rvsdg {{")?;
-        writeln!(out, "    node [shape=record];")?;
+        writeln!(out, "    node [shape=record]")?;
+        writeln!(out, "    edge [arrowhead=none]")?;
         for idx in 0..self.nodes.borrow().len() {
             let node = self.node_ref(NodeId(idx));
             let sig = node.kind().sig();
@@ -220,20 +221,20 @@ impl<S> NodeCtxt<S> {
             match *node.kind() {
                 NodeKind::Op(ref operation) => {
                     let dot_ins = (0..sig.ins_len())
-                        .map(|i| format!("<i{0}> {0}", i))
+                        .map(|i| format!("<i{0}>{0}", i))
                         .collect::<Vec<_>>()
-                        .join(" | ");
+                        .join("|");
                     let dot_outs = (0..sig.outs_len())
-                        .map(|i| format!("<o{0}> {0}", i))
+                        .map(|i| format!("<o{0}>{0}", i))
                         .collect::<Vec<_>>()
-                        .join(" | ");
+                        .join("|");
                     let label_value = vec![dot_ins, format!("{:?}", operation), dot_outs]
                         .into_iter()
                         .filter(|s| !s.is_empty())
                         .collect::<Vec<_>>()
-                        .join("} | {");
-                    let label = format!("{{{{ {} }}}}", label_value);
-                    writeln!(out, r#"    {} [label="{}"]"#, node.id.0, label)?;
+                        .join("}|{");
+                    let label = format!("{{{{{}}}}}", label_value);
+                    writeln!(out, r#"    n{} [label="{}"]"#, node.id.0, label)?;
                 }
                 _ => unimplemented!(),
             }
@@ -249,7 +250,7 @@ impl<S> NodeCtxt<S> {
                         let port_user = i;
                         writeln!(
                             out,
-                            "    {}:o{} -> {}:i{} [color=blue]",
+                            "    n{}:o{} -> n{}:i{} [color=blue]",
                             origin_node_id.0, port_origin, node.id.0, port_user
                         )?;
                     }
@@ -269,7 +270,7 @@ impl<S> NodeCtxt<S> {
                         let port_user = sig.val_ins + i;
                         writeln!(
                             out,
-                            "    {}:o{} -> {}:i{} [style=dashed, color=red]",
+                            "    n{}:o{} -> n{}:i{} [style=dashed, color=red]",
                             origin_node_id.0, port_origin, node.id.0, port_user
                         )?;
                     }
@@ -969,7 +970,7 @@ mod test {
     }
 
     #[test]
-    fn simple_nodes_from_paper() {
+    fn printing_load_store_nodes() {
         let ncx = NodeCtxt::new();
 
         let n_x = ncx.mk_node(TestData::Lit(100));
@@ -1009,13 +1010,49 @@ mod test {
             .operand(n_5.val_out(0))
             .finish();
 
-        let n_store2 = ncx
+        let _ = ncx
             .node_builder(TestData::Store)
             .operand(n_y.val_out(0))
             .operand(n_add_5.val_out(0))
             .state(n_store1.st_out(0))
             .finish();
 
-        ncx.print(&mut io::stdout().lock()).unwrap();
+        let mut buffer = Vec::new();
+        ncx.print(&mut buffer)
+            .expect("unable to print out NodeCtxt");
+        let content = String::from_utf8(buffer).expect("invalid utf8 string");
+        assert_eq!(
+            content,
+            r#"digraph rvsdg {
+    node [shape=record]
+    edge [arrowhead=none]
+    n0 [label="{{Lit(100)}|{<o0>0}}"]
+    n1 [label="{{Lit(104)}|{<o0>0}}"]
+    n2 [label="{{Lit(4)}|{<o0>0}}"]
+    n3 [label="{{Lit(5)}|{<o0>0}}"]
+    n4 [label="{{St}|{<o0>0}}"]
+    n5 [label="{{<i0>0|<i1>1}|{Load}|{<o0>0}}"]
+    n0:o0 -> n5:i0 [color=blue]
+    n4:o0 -> n5:i1 [style=dashed, color=red]
+    n6 [label="{{<i0>0|<i1>1}|{BinAdd}|{<o0>0}}"]
+    n5:o0 -> n6:i0 [color=blue]
+    n2:o0 -> n6:i1 [color=blue]
+    n7 [label="{{<i0>0|<i1>1|<i2>2}|{Store}|{<o0>0}}"]
+    n0:o0 -> n7:i0 [color=blue]
+    n6:o0 -> n7:i1 [color=blue]
+    n4:o0 -> n7:i2 [style=dashed, color=red]
+    n8 [label="{{<i0>0|<i1>1}|{Load}|{<o0>0}}"]
+    n1:o0 -> n8:i0 [color=blue]
+    n7:o0 -> n8:i1 [style=dashed, color=red]
+    n9 [label="{{<i0>0|<i1>1}|{BinAdd}|{<o0>0}}"]
+    n8:o0 -> n9:i0 [color=blue]
+    n3:o0 -> n9:i1 [color=blue]
+    n10 [label="{{<i0>0|<i1>1|<i2>2}|{Store}|{<o0>0}}"]
+    n1:o0 -> n10:i0 [color=blue]
+    n9:o0 -> n10:i1 [color=blue]
+    n7:o0 -> n10:i2 [style=dashed, color=red]
+}
+"#
+        );
     }
 }

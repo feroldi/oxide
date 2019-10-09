@@ -110,10 +110,10 @@ pub struct RegionData {
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct SigS {
-    val_ins: usize,
-    val_outs: usize,
-    st_ins: usize,
-    st_outs: usize,
+    pub val_ins: usize,
+    pub val_outs: usize,
+    pub st_ins: usize,
+    pub st_outs: usize,
 }
 
 impl SigS {

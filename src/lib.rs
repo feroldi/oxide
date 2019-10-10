@@ -214,7 +214,14 @@ impl<S> NodeCtxt<S> {
                         .map(|i| format!("<o{0}>{0}", i))
                         .collect::<Vec<_>>()
                         .join("|");
-                    let label_value = vec![dot_ins, format!("{:?}", operation), dot_outs]
+                    let mut label_op = String::with_capacity(16);
+                    for c in format!("{:?}", operation).chars() {
+                        if c == '{' || c == '}' {
+                            label_op.push('\\');
+                        }
+                        label_op.push(c);
+                    }
+                    let label_value = vec![dot_ins, label_op, dot_outs]
                         .into_iter()
                         .filter(|s| !s.is_empty())
                         .collect::<Vec<_>>()

@@ -168,26 +168,11 @@ impl<S: Sig> Sig for NodeKind<S> {
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
 struct NodeTerm<S> {
     region: RegionId,
     kind: NodeKind<S>,
     origins: Vec<OriginId>,
-}
-
-impl<S: PartialEq> PartialEq for NodeTerm<S> {
-    fn eq(&self, other: &NodeTerm<S>) -> bool {
-        self.region == other.region && self.kind == other.kind && self.origins == other.origins
-    }
-}
-
-impl<S: Eq> Eq for NodeTerm<S> {}
-
-impl<S: Hash> Hash for NodeTerm<S> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.region.hash(state);
-        self.kind.hash(state);
-        self.origins.hash(state);
-    }
 }
 
 pub struct NodeCtxt<S> {

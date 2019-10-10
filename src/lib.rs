@@ -184,6 +184,7 @@ impl<S: Eq> Eq for NodeTerm<S> {}
 
 impl<S: Hash> Hash for NodeTerm<S> {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.region.hash(state);
         self.kind.hash(state);
         self.origins.hash(state);
     }
@@ -310,13 +311,12 @@ impl<S> NodeCtxt<S> {
         }
     }
 
-    fn hash_node_terms(&self, node_kind: &NodeKind<S>, origins: &[OriginId]) -> u64
+    fn compute_node_hash(&self, node_term: &NodeTerm<S>) -> u64
     where
         S: Eq + Hash,
     {
         let mut hasher = self.interned_nodes.borrow().hasher().build_hasher();
-        node_kind.hash(&mut hasher);
-        origins.hash(&mut hasher);
+        node_term.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -400,7 +400,7 @@ impl<S> NodeCtxt<S> {
             origins: origins.into(),
         };
 
-        let node_hash = self.hash_node_terms(&kind, origins);
+        let node_hash = self.compute_node_hash(&node_term);
         let mut interned_nodes = self.interned_nodes.borrow_mut();
         let entry = interned_nodes
             .raw_entry_mut()

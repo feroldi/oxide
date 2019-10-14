@@ -80,22 +80,21 @@ pub enum NodeKind<S> {
         region_val_res: usize,
         region_st_res: usize,
     },
-    Gamma {
-        val_ins: usize,
-        val_outs: usize,
-        st_ins: usize,
-        st_outs: usize,
+    Omega {
+        imports: usize,
+        exports: usize,
     },
 }
 
 pub struct NodeData<S> {
     ins: Vec<UserData>,
     outs: Vec<OriginData>,
-    inner_regions: Option<InnerRegionList>,
+    inner_regions: Cell<Option<InnerRegionList>>,
     outer_region: RegionId,
     kind: NodeKind<S>,
 }
 
+#[derive(Copy, Clone)]
 pub struct InnerRegionList {
     first_region: RegionId,
     last_region: RegionId,
@@ -114,6 +113,16 @@ pub struct SigS {
     pub val_outs: usize,
     pub st_ins: usize,
     pub st_outs: usize,
+    pub regions: Option<RegionSigS>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
+pub struct RegionSigS {
+    pub subregions: usize,
+    pub val_args: usize,
+    pub val_res: usize,
+    pub st_args: usize,
+    pub st_res: usize,
 }
 
 impl SigS {
@@ -150,20 +159,17 @@ impl<S: Sig> Sig for NodeKind<S> {
                 st_ins: arg_st_ins,
                 val_outs: region_val_res,
                 st_outs: region_st_res,
+                ..SigS::default()
             },
-            &NodeKind::Gamma {
-                val_ins,
-                val_outs,
-                st_ins,
-                st_outs,
-            } => {
-                SigS {
-                    val_ins: 1 + val_ins, // predicate + inputs
-                    val_outs,
-                    st_ins,
-                    st_outs,
-                }
-            }
+            &NodeKind::Omega { imports, exports } => SigS {
+                regions: Some(RegionSigS {
+                    subregions: 1,
+                    val_args: imports,
+                    val_res: exports,
+                    ..RegionSigS::default()
+                }),
+                ..SigS::default()
+            },
         }
     }
 }
@@ -374,7 +380,7 @@ impl<S> NodeCtxt<S> {
             self.nodes.borrow_mut().push(NodeData {
                 ins: new_node_inputs,
                 outs: vec![OriginData::default(); kind.sig().outs_len()],
-                inner_regions: None,
+                inner_regions: Cell::default(),
                 // FIXME replace with an argument from mk_node_with.
                 outer_region: region_id,
                 kind,
@@ -424,6 +430,78 @@ impl<S> NodeCtxt<S> {
         S: Sig,
     {
         NodeBuilder::new(self, NodeKind::Op(op))
+    }
+
+    //pub fn struct_node_builder(&self, kind: NodeKind<S>) -> StructNodeBuilder<S>
+    //where
+    //    S: Sig,
+    //{
+    //    StructNodeBuilder::new(self, kind)
+    //}
+
+    //fn mk_struct_node(&self, kind: NodeKind<S>) -> Node<S> {
+    //    let node_id = self.mk_struct_node_with(kind, &[]);
+    //    Node {
+    //        ctxt: self,
+    //        id: node_id,
+    //    }
+    //}
+
+    //fn mk_subregion_head(&self, node_id: NodeId) -> RegionHead {
+    //    unimplemented!();
+    //}
+
+    //fn mk_subregion_tail(&self, subregion_head: RegionHead) -> RegionId {
+    //    unimplemented!();
+    //}
+
+    fn mk_subregion_for_node(&self, node_id: NodeId) -> RegionId where S: Sig {
+        assert!(
+            self.node_data(node_id).sig().regions.is_some(),
+            "only structural nodes may contain regions"
+        );
+
+        let node_data = self.node_data(node_id);
+        let new_region_id = RegionId(self.regions.borrow().len());
+
+        // TODO: This is a linked list where links are identifiers. Basically the same
+        // thing as the UserIdList. Refactor it out to a common implementation
+        // of a linked list so this code doesn't get duplicated in other places.
+        let (prev_region, new_region_list) = match node_data.inner_regions.get() {
+            Some(InnerRegionList {
+                first_region,
+                last_region,
+            }) => {
+                self.region_data(last_region)
+                    .next_region
+                    .set(Some(new_region_id));
+                let new_region_list = InnerRegionList {
+                    first_region,
+                    last_region: new_region_id,
+                };
+                (Some(last_region), new_region_list)
+            }
+            None => (
+                None, // No previous region.
+                InnerRegionList {
+                    first_region: new_region_id,
+                    last_region: new_region_id,
+                },
+            ),
+        };
+
+        node_data.inner_regions.set(Some(new_region_list));
+
+        let region_sig = node_data.sig().regions.unwrap();
+
+        self.regions.borrow_mut().push(RegionData {
+            res: vec![],
+            args: vec![OriginData::default(); region_sig.val_args + region_sig.st_args],
+            prev_region: Cell::new(prev_region),
+            next_region: Cell::default(),
+        });
+
+        new_region_id
     }
 
     pub fn node_ref(&self, node_id: NodeId) -> Node<S> {
@@ -744,6 +822,8 @@ mod test {
         Neg,
         St,
         BinAdd,
+        BinSub,
+        Lt,
         LoadOffset,
         Load,
         Store,
@@ -768,7 +848,7 @@ mod test {
                     st_outs: 1,
                     ..SigS::default()
                 },
-                TestData::BinAdd => SigS {
+                TestData::BinAdd | TestData::BinSub | TestData::Lt => SigS {
                     val_ins: 2,
                     val_outs: 1,
                     ..SigS::default()
@@ -778,18 +858,21 @@ mod test {
                     val_outs: 1,
                     st_ins: 1,
                     st_outs: 1,
+                    ..SigS::default()
                 },
                 TestData::Load => SigS {
                     val_ins: 1,
                     val_outs: 1,
                     st_ins: 1,
                     st_outs: 0,
+                    ..SigS::default()
                 },
                 TestData::Store => SigS {
                     val_ins: 2,
                     val_outs: 0,
                     st_ins: 1,
                     st_outs: 1,
+                    ..SigS::default()
                 },
             }
         }
@@ -1110,5 +1193,52 @@ mod test {
 }
 "#
         );
+
+        //#[test]
+        //fn omega_module_node() {
+        //    let ncx = NodeCtxt::new();
+        //    let m = ncx.mk_struct_node(NodeKind::Omega {
+        //        imports: 4,
+        //        exports: 2,
+        //    });
+
+        //    assert_eq!(
+        //        NodeKind::Omega {
+        //            imports: 4,
+        //            exports: 2,
+        //        },
+        //        m.kind()
+        //    );
+        //    assert_eq!(1, m.sig().regions.unwrap().subregions);
+        //    assert_eq!(4, m.sig().regions.unwrap().subregions.val_args);
+        //    assert_eq!(2, m.sig().regions.unwrap().subregions.val_res);
+        //    assert_eq!(0, m.sig().regions.unwrap().subregions.st_args);
+        //    assert_eq!(0, m.sig().regions.unwrap().subregions.st_res);
+        //}
+
+        #[test]
+        fn connect_region_ports() {
+            let ncx = NodeCtxt::new();
+
+            let p = ncx.mk_node(TestData::Lit(1));
+
+            let gamma = ncx.gamma_node_builder(p.val_out(0));
+
+            let r_false = gamma.subregion(0);
+
+            let n0 = ncx.node_builder(TestData::BinSub)
+                .operand(r_false.val_arg(0))
+                .operand(r_false.val_arg(1))
+                .finish();
+
+            r_true.val_res(0).connect(n0.val_out(0));
+
+            let n1 = ncx.node_builder(TestData::BinSub)
+                .operand(gamma.subregion(1).val_arg(1))
+                .operand(gamma.subregion(1).val_arg(0))
+                .finish();
+
+            gamma.subregion(0).val_res(1).connect(n1.val_out(0));
+        }
     }
 }

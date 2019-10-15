@@ -1,3 +1,4 @@
+use smallvec::SmallVec;
 use std::{
     cell::{Cell, Ref, RefCell},
     collections::{hash_map::RawEntryMut, HashMap},
@@ -50,7 +51,7 @@ impl OriginId {
 /// A UserData contains information about an input or result port.
 pub struct UserData {
     origin: OriginId,
-    sink: Option<OriginId>,
+    sinks: SmallVec<[OriginId; 2]>,
     prev_user: Cell<Option<UserId>>,
     next_user: Cell<Option<UserId>>,
 }
@@ -58,7 +59,7 @@ pub struct UserData {
 /// An OriginData contains information about an output or argument port.
 #[derive(Clone, Default, Debug)]
 pub struct OriginData {
-    source: Option<UserId>,
+    sources: SmallVec<[UserId; 2]>,
     users: Cell<Option<UserIdList>>,
 }
 
@@ -89,11 +90,12 @@ pub enum NodeKind<S> {
 pub struct NodeData<S> {
     ins: Vec<UserData>,
     outs: Vec<OriginData>,
-    inner_regions: Option<InnerRegionList>,
+    inner_regions: Cell<Option<InnerRegionList>>,
     outer_region: RegionId,
     kind: NodeKind<S>,
 }
 
+#[derive(Copy, Clone)]
 pub struct InnerRegionList {
     first_region: RegionId,
     last_region: RegionId,
@@ -112,6 +114,16 @@ pub struct SigS {
     pub val_outs: usize,
     pub st_ins: usize,
     pub st_outs: usize,
+    pub regions: Option<RegionSigS>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
+pub struct RegionSigS {
+    pub subregions: usize,
+    pub val_args: usize,
+    pub val_res: usize,
+    pub st_args: usize,
+    pub st_res: usize,
 }
 
 impl SigS {
@@ -148,6 +160,7 @@ impl<S: Sig> Sig for NodeKind<S> {
                 st_ins: arg_st_ins,
                 val_outs: region_val_res,
                 st_outs: region_st_res,
+                ..SigS::default()
             },
             &NodeKind::Gamma {
                 val_ins,
@@ -160,6 +173,7 @@ impl<S: Sig> Sig for NodeKind<S> {
                     val_outs,
                     st_ins,
                     st_outs,
+                    ..SigS::default()
                 }
             }
         }
@@ -320,8 +334,8 @@ impl<S> NodeCtxt<S> {
 
         let create_node = |kind: NodeKind<S>, origins: &[OriginId]| {
             // Node creation works as follows:
-            // 1. Create the UserData sequence, operanding sinks as you go.
-            // 2. Initialize the OutData sequence with empty users.
+            // 1. Create the UserData sequence, whilst linking the user list of each origin.
+            // 2. Initialize the OriginData sequence with empty users.
             // 3. Push the new node to the node context and return its id.
 
             // Input ports are put into this vector so the node creation comes down to just
@@ -361,7 +375,7 @@ impl<S> NodeCtxt<S> {
                 self.origin_data(origin).users.set(Some(new_user_list));
                 new_node_inputs.push(UserData {
                     origin,
-                    sink: None,
+                    sinks: SmallVec::new(),
                     prev_user: Cell::new(prev_user),
                     next_user: Cell::default(),
                 });
@@ -372,7 +386,7 @@ impl<S> NodeCtxt<S> {
             self.nodes.borrow_mut().push(NodeData {
                 ins: new_node_inputs,
                 outs: vec![OriginData::default(); kind.sig().outs_len()],
-                inner_regions: None,
+                inner_regions: Cell::default(),
                 // FIXME replace with an argument from mk_node_with.
                 outer_region: region_id,
                 kind,
@@ -454,6 +468,58 @@ impl<S> NodeCtxt<S> {
             ctxt: self,
             origin_id,
         }
+    }
+
+    fn mk_subregion_for_node(&self, node_id: NodeId) -> RegionId
+    where
+        S: Sig,
+    {
+        assert!(
+            self.node_data(node_id).sig().regions.is_some(),
+            "only structural nodes may contain regions"
+        );
+
+        let node_data = self.node_data(node_id);
+        let new_region_id = RegionId(self.regions.borrow().len());
+
+        // TODO: This is a linked list where links are identifiers. Basically the same
+        // thing as the UserIdList. Refactor it out to a common implementation
+        // of a linked list so this code doesn't get duplicated in other places.
+        let (prev_region, new_region_list) = match node_data.inner_regions.get() {
+            Some(InnerRegionList {
+                first_region,
+                last_region,
+            }) => {
+                self.region_data(last_region)
+                    .next_region
+                    .set(Some(new_region_id));
+                let new_region_list = InnerRegionList {
+                    first_region,
+                    last_region: new_region_id,
+                };
+                (Some(last_region), new_region_list)
+            }
+            None => (
+                None, // No previous region.
+                InnerRegionList {
+                    first_region: new_region_id,
+                    last_region: new_region_id,
+                },
+            ),
+        };
+
+        node_data.inner_regions.set(Some(new_region_list));
+
+        let region_sig = node_data.sig().regions.unwrap();
+
+        self.regions.borrow_mut().push(RegionData {
+            res: vec![],
+            args: vec![OriginData::default(); region_sig.val_args + region_sig.st_args],
+            prev_region: Cell::new(prev_region),
+            next_region: Cell::default(),
+        });
+
+        new_region_id
     }
 }
 
@@ -791,18 +857,21 @@ mod test {
                     val_outs: 1,
                     st_ins: 1,
                     st_outs: 1,
+                    ..SigS::default()
                 },
                 TestData::Load => SigS {
                     val_ins: 1,
                     val_outs: 1,
                     st_ins: 1,
                     st_outs: 0,
+                    ..SigS::default()
                 },
                 TestData::Store => SigS {
                     val_ins: 2,
                     val_outs: 0,
                     st_ins: 1,
                     st_outs: 1,
+                    ..SigS::default()
                 },
             }
         }

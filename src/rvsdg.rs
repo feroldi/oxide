@@ -1,9 +1,8 @@
 use smallvec::SmallVec;
 use std::{
     cell::{Cell, Ref, RefCell},
-    collections::{hash_map::RawEntryMut, HashMap},
     fmt::{self, Debug},
-    hash::{BuildHasher, Hash, Hasher},
+    hash::Hash,
     io::{self, Write},
     ptr,
 };
@@ -96,7 +95,6 @@ pub struct NodeData<S> {
     ins: Vec<UserData>,
     outs: Vec<OriginData>,
     inner_regions: Cell<Option<InnerRegionList>>,
-    outer_region: RegionId,
     kind: NodeKind<S>,
 }
 
@@ -180,31 +178,21 @@ impl<S: Sig> Sig for NodeKind<S> {
                 val_outs,
                 st_ins,
                 st_outs,
-            } => {
-                SigS {
-                    val_ins: 1 + val_ins, // predicate + inputs
-                    val_outs,
-                    st_ins,
-                    st_outs,
-                    ..SigS::default()
-                }
-            }
+            } => SigS {
+                val_ins: 1 + val_ins, // predicate + inputs
+                val_outs,
+                st_ins,
+                st_outs,
+                ..SigS::default()
+            },
             &NodeKind::Omega { .. } => SigS::default(),
         }
     }
 }
 
-#[derive(PartialEq, Eq, Hash)]
-struct NodeTerm<S> {
-    region: RegionId,
-    kind: NodeKind<S>,
-    origins: SmallVec<[OriginId; 4]>,
-}
-
 pub struct NodeCtxt<S> {
     nodes: RefCell<Vec<NodeData<S>>>,
     regions: RefCell<Vec<RegionData>>,
-    interned_nodes: RefCell<HashMap<NodeTerm<S>, NodeId>>,
 }
 
 impl<S> NodeCtxt<S> {
@@ -215,29 +203,23 @@ impl<S> NodeCtxt<S> {
         NodeCtxt {
             nodes: RefCell::new(vec![]),
             regions: RefCell::new(vec![]),
-            interned_nodes: RefCell::default(),
         }
     }
 
     // FIXME: This doesn't do interning. How could we do it?
-    fn create_node(&self, node_kind: NodeKind<S>, outer_region_id: RegionId) -> Node<'_, S>
+    fn create_node(&self, node_kind: NodeKind<S>) -> NodeId
     where
         S: Sig,
     {
-        let node_id;
-
-        {
-            let mut nodes = self.nodes.borrow_mut();
-            node_id = NodeId(nodes.len());
-            nodes.push(NodeData {
-                ins: vec![UserData::default(); node_kind.sig().num_input_ports()],
-                outs: vec![OriginData::default(); node_kind.sig().num_output_ports()],
-                inner_regions: Cell::default(),
-                outer_region: outer_region_id,
-                kind: node_kind,
-            });
-        }
-        self.node_ref(node_id)
+        let mut nodes = self.nodes.borrow_mut();
+        let node_id = NodeId(nodes.len());
+        nodes.push(NodeData {
+            ins: vec![UserData::default(); node_kind.sig().num_input_ports()],
+            outs: vec![OriginData::default(); node_kind.sig().num_output_ports()],
+            inner_regions: Cell::default(),
+            kind: node_kind,
+        });
+        node_id
     }
 
     fn connect_ports(&self, user_id: UserId, origin_id: OriginId) {
@@ -267,6 +249,86 @@ impl<S> NodeCtxt<S> {
         };
 
         origin_data.users.set(Some(new_user_list));
+    }
+
+    pub fn node_data(&self, id: NodeId) -> Ref<NodeData<S>> {
+        Ref::map(self.nodes.borrow(), |nodes| &nodes[id.0])
+    }
+
+    pub fn region_data(&self, id: RegionId) -> Ref<RegionData> {
+        Ref::map(self.regions.borrow(), |regions| &regions[id.0])
+    }
+
+    pub fn user_data(&self, user_id: UserId) -> Ref<UserData> {
+        match user_id {
+            UserId::In { node, index } => {
+                Ref::map(self.node_data(node), |node_data| &node_data.ins[index])
+            }
+            UserId::Res { region, index } => Ref::map(self.region_data(region), |region_data| {
+                &region_data.res[index]
+            }),
+        }
+    }
+
+    pub fn origin_data(&self, origin_id: OriginId) -> Ref<OriginData> {
+        match origin_id {
+            OriginId::Out { node, index } => {
+                Ref::map(self.node_data(node), |node_data| &node_data.outs[index])
+            }
+            OriginId::Arg { region, index } => Ref::map(self.region_data(region), |region_data| {
+                &region_data.args[index]
+            }),
+        }
+    }
+
+    pub fn mk_node(&self, op: S) -> Node<S>
+    where
+        S: Sig + Eq + Hash + Clone,
+    {
+        let node_id = self.create_node(NodeKind::Op(op));
+        Node {
+            ctxt: self,
+            id: node_id,
+        }
+    }
+
+    pub fn node_builder(&self, op: S) -> NodeBuilder<S>
+    where
+        S: Sig,
+    {
+        NodeBuilder::new(self, NodeKind::Op(op))
+    }
+
+    pub fn node_ref(&self, node_id: NodeId) -> Node<S> {
+        assert!(node_id.0 < self.nodes.borrow().len());
+        Node {
+            ctxt: self,
+            id: node_id,
+        }
+    }
+
+    pub fn user_ref<'g>(&'g self, user_id: UserId) -> User<'g, S> {
+        match user_id {
+            UserId::In { node, index } => assert!(index < self.node_data(node).ins.len()),
+            UserId::Res { region, index } => assert!(index < self.region_data(region).res.len()),
+        }
+
+        User {
+            ctxt: self,
+            user_id,
+        }
+    }
+
+    pub fn origin_ref<'g>(&'g self, origin_id: OriginId) -> Origin<'g, S> {
+        match origin_id {
+            OriginId::Out { node, index } => assert!(index < self.node_data(node).outs.len()),
+            OriginId::Arg { region, index } => assert!(index < self.region_data(region).args.len()),
+        }
+
+        Origin {
+            ctxt: self,
+            origin_id,
+        }
     }
 
     pub fn print(&self, out: &mut dyn Write) -> io::Result<()>
@@ -348,196 +410,6 @@ impl<S> NodeCtxt<S> {
         }
         writeln!(out, "}}")
     }
-
-    pub fn node_data(&self, id: NodeId) -> Ref<NodeData<S>> {
-        Ref::map(self.nodes.borrow(), |nodes| &nodes[id.0])
-    }
-
-    pub fn region_data(&self, id: RegionId) -> Ref<RegionData> {
-        Ref::map(self.regions.borrow(), |regions| &regions[id.0])
-    }
-
-    pub fn user_data(&self, user_id: UserId) -> Ref<UserData> {
-        match user_id {
-            UserId::In { node, index } => {
-                Ref::map(self.node_data(node), |node_data| &node_data.ins[index])
-            }
-            UserId::Res { region, index } => Ref::map(self.region_data(region), |region_data| {
-                &region_data.res[index]
-            }),
-        }
-    }
-
-    pub fn origin_data(&self, origin_id: OriginId) -> Ref<OriginData> {
-        match origin_id {
-            OriginId::Out { node, index } => {
-                Ref::map(self.node_data(node), |node_data| &node_data.outs[index])
-            }
-            OriginId::Arg { region, index } => Ref::map(self.region_data(region), |region_data| {
-                &region_data.args[index]
-            }),
-        }
-    }
-
-    fn compute_node_hash(&self, node_term: &NodeTerm<S>) -> u64
-    where
-        S: Eq + Hash,
-    {
-        let mut hasher = self.interned_nodes.borrow().hasher().build_hasher();
-        node_term.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn mk_node_with(&self, kind: NodeKind<S>, origins: &[OriginId]) -> NodeId
-    where
-        S: Sig + Eq + Hash + Clone,
-    {
-        assert_eq!(kind.sig().num_input_ports(), origins.len());
-
-        let region_id = RegionId(0);
-
-        let create_node = |kind: NodeKind<S>, origins: &[OriginId]| {
-            // Node creation works as follows:
-            //
-            // 1. Create the UserData sequence, whilst linking the user list of each origin.
-            // 2. Initialize the OriginData sequence with empty users.
-            // 3. Push the new node to the node context and return its id.
-
-            // Input ports are put into this vector so the node creation comes down to just
-            // a push into the `self.nodes`.
-            let mut new_node_inputs = Vec::<UserData>::with_capacity(kind.sig().num_input_ports());
-            let node_id = NodeId(self.nodes.borrow().len());
-
-            for (i, &origin) in origins.iter().enumerate() {
-                let new_in_id = UserId::In {
-                    node: node_id,
-                    index: i,
-                };
-                let (prev_user, new_user_list) = match self.origin_data(origin).users.get() {
-                    Some(UserIdList { first, last }) => {
-                        match last {
-                            UserId::In { node, index } if node == node_id => {
-                                new_node_inputs[index].next_user.set(Some(new_in_id));
-                            }
-                            _ => {
-                                self.user_data(last).next_user.set(Some(new_in_id));
-                            }
-                        }
-                        let new_user_list = UserIdList {
-                            first,
-                            last: new_in_id,
-                        };
-                        (Some(last), new_user_list)
-                    }
-                    None => (
-                        None, // No previous user.
-                        UserIdList {
-                            first: new_in_id,
-                            last: new_in_id,
-                        },
-                    ),
-                };
-                self.origin_data(origin).users.set(Some(new_user_list));
-                new_node_inputs.push(UserData {
-                    origin: Cell::new(Some(origin)),
-                    sinks: SmallVec::new(),
-                    prev_user: Cell::new(prev_user),
-                    next_user: Cell::default(),
-                });
-            }
-
-            let sig = kind.sig();
-
-            self.nodes.borrow_mut().push(NodeData {
-                ins: new_node_inputs,
-                outs: vec![OriginData::default(); kind.sig().num_output_ports()],
-                inner_regions: Cell::default(),
-                // FIXME replace with an argument from mk_node_with.
-                outer_region: region_id,
-                kind,
-            });
-
-            assert_eq!(self.node_data(node_id).ins.len(), sig.num_input_ports());
-            assert_eq!(self.node_data(node_id).outs.len(), sig.num_output_ports());
-
-            node_id
-        };
-
-        let node_term = NodeTerm {
-            region: region_id,
-            kind: kind.clone(),
-            origins: origins.into(),
-        };
-
-        let node_hash = self.compute_node_hash(&node_term);
-        let mut interned_nodes = self.interned_nodes.borrow_mut();
-        let entry = interned_nodes
-            .raw_entry_mut()
-            .from_key_hashed_nocheck(node_hash, &node_term);
-
-        match entry {
-            RawEntryMut::Occupied(e) => *e.get(),
-            RawEntryMut::Vacant(e) => {
-                let node_id = create_node(kind, origins);
-                e.insert_hashed_nocheck(node_hash, node_term, node_id);
-                node_id
-            }
-        }
-    }
-
-    fn mk_region_for_node(&self, node_id: NodeId, region_sig: RegionSigS) -> RegionId {
-        unimplemented!()
-    }
-
-    pub fn mk_node(&self, op: S) -> Node<S>
-    where
-        S: Sig + Eq + Hash + Clone,
-    {
-        let node_id = self.mk_node_with(NodeKind::Op(op), &[]);
-        Node {
-            ctxt: self,
-            id: node_id,
-        }
-    }
-
-    pub fn node_builder(&self, op: S) -> NodeBuilder<S>
-    where
-        S: Sig,
-    {
-        NodeBuilder::new(self, NodeKind::Op(op))
-    }
-
-    pub fn node_ref(&self, node_id: NodeId) -> Node<S> {
-        assert!(node_id.0 < self.nodes.borrow().len());
-        Node {
-            ctxt: self,
-            id: node_id,
-        }
-    }
-
-    pub fn user_ref<'g>(&'g self, user_id: UserId) -> User<'g, S> {
-        match user_id {
-            UserId::In { node, index } => assert!(index < self.node_data(node).ins.len()),
-            UserId::Res { region, index } => assert!(index < self.region_data(region).res.len()),
-        }
-
-        User {
-            ctxt: self,
-            user_id,
-        }
-    }
-
-    pub fn origin_ref<'g>(&'g self, origin_id: OriginId) -> Origin<'g, S> {
-        match origin_id {
-            OriginId::Out { node, index } => assert!(index < self.node_data(node).outs.len()),
-            OriginId::Arg { region, index } => assert!(index < self.region_data(region).args.len()),
-        }
-
-        Origin {
-            ctxt: self,
-            origin_id,
-        }
-    }
 }
 
 impl<S> PartialEq for NodeCtxt<S> {
@@ -598,7 +470,7 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
 
     pub fn finish(self) -> Node<'g, S>
     where
-        S: Eq + Hash + Clone,
+        S: Eq + Hash + Copy + Clone,
     {
         let sig = self.node_kind.sig();
         assert_eq!(self.val_origins.len(), sig.val_ins);
@@ -612,7 +484,16 @@ impl<'g, S: Sig> NodeBuilder<'g, S> {
 
         assert_eq!(origins.len(), sig.val_ins + sig.st_ins);
 
-        let node_id = self.ctxt.mk_node_with(self.node_kind, &origins);
+        let node_id = self.ctxt.create_node(self.node_kind);
+        let node = self.ctxt.node_ref(node_id);
+
+        for (i, &val_origin) in self.val_origins.iter().enumerate() {
+            node.val_in(i).connect(val_origin);
+        }
+
+        for (i, &st_origin) in self.st_origins.iter().enumerate() {
+            node.st_in(i).connect(st_origin);
+        }
 
         Node {
             ctxt: self.ctxt,
@@ -868,7 +749,7 @@ impl<'g, S> StOrigin<'g, S> {
 
 #[cfg(test)]
 mod test {
-    use super::{NodeCtxt, NodeKind, OriginId, RegionId, RegionSigS, Sig, SigS};
+    use super::{NodeCtxt, NodeKind, UserId, OriginId, Sig, SigS};
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum TestData {
@@ -934,7 +815,7 @@ mod test {
     #[test]
     fn create_single_node() {
         let ncx = NodeCtxt::new();
-        let n0 = ncx.mk_node_with(NodeKind::Op(TestData::Lit(0)), &[]);
+        let n0 = ncx.create_node(NodeKind::Op(TestData::Lit(0)));
         assert_eq!(0, ncx.node_data(n0).ins.len());
         assert_eq!(1, ncx.node_data(n0).outs.len());
     }
@@ -942,10 +823,12 @@ mod test {
     #[test]
     fn create_node_with_an_input() {
         let ncx = NodeCtxt::new();
-        let n0 = ncx.mk_node_with(NodeKind::Op(TestData::Lit(0)), &[]);
-        let n1 = ncx.mk_node_with(
-            NodeKind::Op(TestData::Neg),
-            &[OriginId::Out { node: n0, index: 0 }],
+        let n0 = ncx.create_node(NodeKind::Op(TestData::Lit(0)));
+        let n1 = ncx.create_node(NodeKind::Op(TestData::Neg));
+
+        ncx.connect_ports(
+            UserId::In { node: n1, index: 0 },
+            OriginId::Out { node: n0, index: 0 },
         );
 
         assert_eq!(
@@ -975,22 +858,25 @@ mod test {
     fn create_node_with_input_ports() {
         let ncx = NodeCtxt::new();
 
-        let n0 = ncx.mk_node_with(NodeKind::Op(TestData::Lit(2)), &[]);
+        let n0 = ncx.create_node(NodeKind::Op(TestData::Lit(2)));
 
         assert_eq!(0, ncx.node_data(n0).ins.len());
         assert_eq!(1, ncx.node_data(n0).outs.len());
 
-        let n1 = ncx.mk_node_with(NodeKind::Op(TestData::Lit(3)), &[]);
+        let n1 = ncx.create_node(NodeKind::Op(TestData::Lit(3)));
 
         assert_eq!(0, ncx.node_data(n1).ins.len());
         assert_eq!(1, ncx.node_data(n1).outs.len());
 
-        let n2 = ncx.mk_node_with(
-            NodeKind::Op(TestData::BinAdd),
-            &[
-                OriginId::Out { node: n0, index: 0 },
-                OriginId::Out { node: n1, index: 0 },
-            ],
+        let n2 = ncx.create_node(NodeKind::Op(TestData::BinAdd));
+
+        ncx.connect_ports(
+            UserId::In { node: n2, index: 0 },
+            OriginId::Out { node: n0, index: 0 },
+        );
+        ncx.connect_ports(
+            UserId::In { node: n2, index: 1 },
+            OriginId::Out { node: n1, index: 0 },
         );
 
         assert_eq!(2, ncx.node_data(n2).ins.len());
@@ -1135,6 +1021,7 @@ mod test {
     }
 
     #[test]
+    #[should_panic]
     fn reuse_existing_eq_nodes_at_creation() {
         let ncx = NodeCtxt::new();
 
@@ -1259,9 +1146,9 @@ mod test {
     fn manually_connecting_ports() {
         let ncx = NodeCtxt::new();
 
-        let lit_a = ncx.create_node(NodeKind::Op(TestData::Lit(2)), RegionId(0));
-        let lit_b = ncx.create_node(NodeKind::Op(TestData::Lit(3)), RegionId(0));
-        let add = ncx.create_node(NodeKind::Op(TestData::BinAdd), RegionId(0));
+        let lit_a = ncx.mk_node(TestData::Lit(2));
+        let lit_b = ncx.mk_node(TestData::Lit(3));
+        let add = ncx.mk_node(TestData::BinAdd);
 
         add.val_in(0).connect(lit_a.val_out(0));
         add.val_in(1).connect(lit_b.val_out(0));
@@ -1275,27 +1162,5 @@ mod test {
 
         assert_eq!(Some(add.val_in(1)), users.next());
         assert_eq!(None, users.next());
-    }
-
-    #[test]
-    fn regions() {
-        let ncx = NodeCtxt::<TestData>::new();
-
-        let omega_id = ncx.mk_node_with(
-            NodeKind::Omega {
-                imports: 1,
-                exports: 1,
-            },
-            &[],
-        );
-
-        let r0_id = ncx.mk_region_for_node(
-            omega_id,
-            RegionSigS {
-                val_args: 2,
-                val_res: 1,
-                ..RegionSigS::default()
-            },
-        );
     }
 }

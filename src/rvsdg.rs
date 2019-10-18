@@ -292,13 +292,6 @@ impl<S> NodeCtxt<S> {
         }
     }
 
-    pub fn node_builder(&self, op: S) -> NodeBuilder<S>
-    where
-        S: Sig,
-    {
-        NodeBuilder::new(self, NodeKind::Op(op))
-    }
-
     pub fn node_ref(&self, node_id: NodeId) -> Node<S> {
         assert!(node_id.0 < self.nodes.borrow().len());
         Node {
@@ -415,90 +408,6 @@ impl<S> NodeCtxt<S> {
 impl<S> PartialEq for NodeCtxt<S> {
     fn eq(&self, other: &NodeCtxt<S>) -> bool {
         ptr::eq(self, other)
-    }
-}
-
-pub struct NodeBuilder<'g, S> {
-    ctxt: &'g NodeCtxt<S>,
-    node_kind: NodeKind<S>,
-    val_origins: Vec<ValOrigin<'g, S>>,
-    st_origins: Vec<StOrigin<'g, S>>,
-}
-
-impl<'g, S: Sig> NodeBuilder<'g, S> {
-    pub fn new(ctxt: &'g NodeCtxt<S>, node_kind: NodeKind<S>) -> NodeBuilder<'g, S> {
-        let sig = node_kind.sig();
-        NodeBuilder {
-            ctxt,
-            node_kind,
-            val_origins: Vec::with_capacity(sig.val_ins),
-            st_origins: Vec::with_capacity(sig.st_ins),
-        }
-    }
-
-    pub fn operand(mut self, val_origin: ValOrigin<'g, S>) -> NodeBuilder<'g, S> {
-        assert!(self.val_origins.len() < self.node_kind.sig().val_ins);
-        self.val_origins.push(val_origin);
-        self
-    }
-
-    pub fn operands(mut self, val_origins: &[ValOrigin<'g, S>]) -> NodeBuilder<'g, S>
-    where
-        S: Clone,
-    {
-        assert!(self.val_origins.is_empty());
-        assert_eq!(self.node_kind.sig().val_ins, val_origins.len());
-        self.val_origins.extend(val_origins.iter().cloned());
-        self
-    }
-
-    pub fn state(mut self, st_origin: StOrigin<'g, S>) -> NodeBuilder<'g, S> {
-        assert!(self.st_origins.len() < self.node_kind.sig().st_ins);
-        self.st_origins.push(st_origin);
-        self
-    }
-
-    pub fn states(mut self, st_origins: &[StOrigin<'g, S>]) -> NodeBuilder<'g, S>
-    where
-        S: Clone,
-    {
-        assert!(self.st_origins.is_empty());
-        assert_eq!(self.node_kind.sig().st_ins, st_origins.len());
-        self.st_origins.extend(st_origins.iter().cloned());
-        self
-    }
-
-    pub fn finish(self) -> Node<'g, S>
-    where
-        S: Eq + Hash + Copy + Clone,
-    {
-        let sig = self.node_kind.sig();
-        assert_eq!(self.val_origins.len(), sig.val_ins);
-        assert_eq!(self.st_origins.len(), sig.st_ins);
-
-        let origins: Vec<OriginId> = {
-            let val_origins = self.val_origins.iter().map(|val_origin| val_origin.0.id());
-            let st_origins = self.st_origins.iter().map(|st_origin| st_origin.0.id());
-            val_origins.chain(st_origins).collect()
-        };
-
-        assert_eq!(origins.len(), sig.val_ins + sig.st_ins);
-
-        let node_id = self.ctxt.create_node(self.node_kind);
-        let node = self.ctxt.node_ref(node_id);
-
-        for (i, &val_origin) in self.val_origins.iter().enumerate() {
-            node.val_in(i).connect(val_origin);
-        }
-
-        for (i, &st_origin) in self.st_origins.iter().enumerate() {
-            node.st_in(i).connect(st_origin);
-        }
-
-        Node {
-            ctxt: self.ctxt,
-            id: node_id,
-        }
     }
 }
 
@@ -842,10 +751,8 @@ mod test {
         let ncx = NodeCtxt::new();
 
         let n0 = ncx.mk_node(TestData::Lit(0));
-        let n1 = ncx
-            .node_builder(TestData::Neg)
-            .operand(n0.val_out(0))
-            .finish();
+        let n1 = ncx.mk_node(TestData::Neg);
+        n1.val_in(0).connect(n0.val_out(0));
 
         assert_eq!(
             Some(n0.id),
@@ -928,12 +835,11 @@ mod test {
         let n1 = ncx.mk_node(TestData::Lit(3));
         let n2 = ncx.mk_node(TestData::St);
 
-        let n3 = ncx
-            .node_builder(TestData::LoadOffset)
-            .operand(n0.val_out(0))
-            .operand(n1.val_out(0))
-            .state(n2.st_out(0))
-            .finish();
+        let n3 = ncx.mk_node(TestData::LoadOffset);
+
+        n3.val_in(0).connect(n0.val_out(0));
+        n3.val_in(1).connect(n1.val_out(0));
+        n3.st_in(0).connect(n2.st_out(0));
 
         assert_eq!(n0.val_out(0), n3.val_in(0).origin());
         assert_eq!(n1.val_out(0), n3.val_in(1).origin());

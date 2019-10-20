@@ -107,7 +107,7 @@ impl<'g> Lower<'g, Hir, Lir> for HirToLir {
 #[cfg(test)]
 mod test {
     use super::{Hir, HirToLir, Lower};
-    use crate::rvsdg::NodeCtxt;
+    use crate::rvsdg::{Node, NodeCtxt, NodeKind, Sig, SigS};
 
     #[test]
     fn hir_to_lir() {
@@ -166,6 +166,128 @@ mod test {
     n6 [label="{{<i0>0|<i1>1}|{Load}|{<o0>0}}"]
     n5:o0 -> n6:i0 [color=blue]
     n2:o0 -> n6:i1 [style=dashed, color=red]
+}
+"#
+        );
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum Ir {
+        Lit(i32),
+        Var(&'static str),
+        Add,
+    }
+
+    impl Sig for Ir {
+        fn sig(&self) -> SigS {
+            match self {
+                Ir::Lit(..) => SigS {
+                    val_outs: 1,
+                    ..<_>::default()
+                },
+                Ir::Var(..) => SigS {
+                    val_outs: 1,
+                    ..<_>::default()
+                },
+                Ir::Add => SigS {
+                    val_ins: 2,
+                    val_outs: 1,
+                    ..<_>::default()
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn constant_folding() {
+        struct ConstFoldOpt;
+
+        impl<'g> Lower<'g, Ir, Ir> for ConstFoldOpt {
+            fn lower(&mut self, node: Node<'_, Ir>, ncx: &'g NodeCtxt<Ir>) -> Node<'g, Ir> {
+                let op = match *node.kind() {
+                    NodeKind::Op(op) => op,
+                    _ => unimplemented!(),
+                };
+                match op {
+                    Ir::Lit(lit) => ncx.mk_node(Ir::Lit(lit)),
+                    Ir::Var(var) => ncx.mk_node(Ir::Var(var)),
+                    Ir::Add => {
+                        let lhs = node.val_in(0).origin().producer();
+                        let rhs = node.val_in(1).origin().producer();
+
+                        match (*lhs.kind(), *rhs.kind()) {
+                            (NodeKind::Op(Ir::Lit(val_lhs)), NodeKind::Op(Ir::Lit(val_rhs))) => {
+                                ncx.mk_node(Ir::Lit(val_lhs + val_rhs))
+                            }
+                            _ => {
+                                let lhs = self.lower(lhs, ncx);
+                                let rhs = self.lower(rhs, ncx);
+                                ncx.node_builder(Ir::Add)
+                                    .operand(lhs.val_out(0))
+                                    .operand(rhs.val_out(0))
+                                    .finish()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let ncx_noopt = NodeCtxt::new();
+
+        let n0 = ncx_noopt
+            .node_builder(Ir::Add)
+            .operand(ncx_noopt.mk_node(Ir::Lit(2)).val_out(0))
+            .operand(ncx_noopt.mk_node(Ir::Lit(3)).val_out(0))
+            .finish();
+
+        let n1 = ncx_noopt
+            .node_builder(Ir::Add)
+            .operand(n0.val_out(0))
+            .operand(ncx_noopt.mk_node(Ir::Var("x")).val_out(0))
+            .finish();
+
+        let mut noopt_buffer = Vec::new();
+        ncx_noopt.print(&mut noopt_buffer).unwrap();
+        let noopt_content = String::from_utf8(noopt_buffer).unwrap();
+
+        assert_eq!(
+            noopt_content,
+            r#"digraph rvsdg {
+    node [shape=record]
+    edge [arrowhead=none]
+    n0 [label="{{Lit(2)}|{<o0>0}}"]
+    n1 [label="{{Lit(3)}|{<o0>0}}"]
+    n2 [label="{{<i0>0|<i1>1}|{Add}|{<o0>0}}"]
+    n0:o0 -> n2:i0 [color=blue]
+    n1:o0 -> n2:i1 [color=blue]
+    n3 [label="{{Var("x")}|{<o0>0}}"]
+    n4 [label="{{<i0>0|<i1>1}|{Add}|{<o0>0}}"]
+    n2:o0 -> n4:i0 [color=blue]
+    n3:o0 -> n4:i1 [color=blue]
+}
+"#
+        );
+
+        let mut cfopt = ConstFoldOpt;
+        let ncx_opt = NodeCtxt::new();
+
+        cfopt.lower(n1, &ncx_opt);
+
+        let mut opt_buffer = Vec::new();
+        ncx_opt.print(&mut opt_buffer).unwrap();
+        let opt_content = String::from_utf8(opt_buffer).unwrap();
+
+        assert_eq!(
+            opt_content,
+            r#"digraph rvsdg {
+    node [shape=record]
+    edge [arrowhead=none]
+    n0 [label="{{Lit(5)}|{<o0>0}}"]
+    n1 [label="{{Var("x")}|{<o0>0}}"]
+    n2 [label="{{<i0>0|<i1>1}|{Add}|{<o0>0}}"]
+    n0:o0 -> n2:i0 [color=blue]
+    n1:o0 -> n2:i1 [color=blue]
 }
 "#
         );

@@ -1278,6 +1278,7 @@ mod test {
     }
 
     #[test]
+    #[should_panic]
     fn regions() {
         let ncx = NodeCtxt::<TestData>::new();
 

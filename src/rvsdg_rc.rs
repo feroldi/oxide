@@ -1,13 +1,8 @@
 use std::{
     cell::RefCell,
     fmt::{self, Debug},
-    rc::Rc,
+    rc::{Rc, Weak},
 };
-
-trait SimpleOp {
-    fn operand(&self, index: usize) -> Port;
-    fn result(&self, index: usize) -> Port;
-}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PortType {
@@ -21,29 +16,44 @@ struct Port {
     label: String,
 }
 
-struct Node {
-    ins: Vec<In>,
-    outs: Vec<Out>,
+impl Port {
+    fn with_label(port_type: PortType, label: String) -> Port {
+        Port { port_type, label }
+    }
+
+    fn port_type(&self) -> PortType {
+        self.port_type
+    }
 }
 
+struct Node {
+    ins: Vec<Rc<InData>>,
+    outs: Vec<Rc<RefCell<OutData>>>,
+}
+
+#[derive(Debug)]
 struct InData {
     origin: Out,
     port: Port,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct In {
-    data: Rc<RefCell<InData>>,
+    data: Rc<InData>,
 }
 
 impl In {
     fn with_origin(port: Port, origin: Out) -> In {
-        assert_eq!(port.port_type, origin.port_type(), "incompatible port types");
+        assert_eq!(
+            port.port_type(),
+            origin.port_type(),
+            "incompatible port types"
+        );
 
-        let input_data = Rc::new(RefCell::new(InData {
+        let input_data = Rc::new(InData {
             origin: origin.clone(),
             port,
-        }));
+        });
 
         let input = In { data: input_data };
         let mut origin_mut = origin;
@@ -51,14 +61,19 @@ impl In {
 
         input
     }
+
+    fn port_type(&self) -> PortType {
+        self.data.port.port_type()
+    }
 }
 
+#[derive(Debug)]
 struct OutData {
-    users: Vec<In>,
+    users: Vec<Weak<InData>>,
     port: Port,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Out {
     data: Rc<RefCell<OutData>>,
 }
@@ -74,15 +89,20 @@ impl Out {
     }
 
     fn users(&self) -> impl Iterator<Item = In> {
-        self.data.borrow().users.clone().into_iter()
+        self.data
+            .borrow()
+            .users
+            .clone()
+            .into_iter()
+            .flat_map(|input| input.upgrade().and_then(|data| Some(In { data })))
     }
 
     fn add_user(&mut self, user: In) {
-        self.data.borrow_mut().users.push(user);
+        self.data.borrow_mut().users.push(Rc::downgrade(&user.data));
     }
 
     fn port_type(&self) -> PortType {
-        self.data.borrow().port.port_type
+        self.data.borrow().port.port_type()
     }
 }
 
@@ -98,27 +118,45 @@ impl PartialEq for Out {
     }
 }
 
-impl Debug for In {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "In {{ port: {:?} }}", self.data.borrow().port)
-    }
-}
-
-impl Debug for Out {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Out {{ port: {:?} }}", self.data.borrow().port)
-    }
-}
+#[derive(Clone)]
+struct StructIn(In);
 
 #[derive(Clone)]
-struct StlIn(In);
+struct StructOut(Out);
 
 #[derive(Clone)]
-struct StlOut(Out);
+struct Arg {
+    data: Rc<RefCell<ArgData>>,
+}
 
 struct ArgData {
-    
+    input: StructIn,
 }
+
+#[derive(Clone)]
+struct Res {
+    data: Rc<RefCell<ResData>>,
+}
+
+struct ResData {
+    output: StructOut,
+}
+
+impl PartialEq for Arg {
+    fn eq(&self, other: &Arg) -> bool {
+        Rc::ptr_eq(&self.data, &other.data)
+    }
+}
+
+impl PartialEq for Res {
+    fn eq(&self, other: &Res) -> bool {
+        Rc::ptr_eq(&self.data, &other.data)
+    }
+}
+
+struct StructNode(Node);
+
+struct Region {}
 
 impl Node {
     fn new() -> Node {
@@ -129,22 +167,16 @@ impl Node {
     }
 
     fn add_input(&mut self, port_type: PortType, origin: Out) -> In {
-        let port = Port {
-            port_type,
-            label: format!("i{}", self.ins.len()),
-        };
+        let port = Port::with_label(port_type, format!("i{}", self.ins.len()));
         let input = In::with_origin(port, origin);
-        self.ins.push(input.clone());
+        self.ins.push(input.data.clone());
         input
     }
 
     fn add_output(&mut self, port_type: PortType) -> Out {
-        let port = Port {
-            port_type,
-            label: format!("o{}", self.outs.len()),
-        };
+        let port = Port::with_label(port_type, format!("o{}", self.outs.len()));
         let output = Out::new(port);
-        self.outs.push(output.clone());
+        self.outs.push(output.data.clone());
         output
     }
 }
@@ -166,6 +198,8 @@ mod tests {
         let mut n0 = Node::new();
         let o0 = n0.add_output(PortType::Value);
 
+        assert_eq!(PortType::Value, o0.port_type());
+
         assert_eq!(0, n0.ins.len());
         assert_eq!(1, n0.outs.len());
 
@@ -173,17 +207,21 @@ mod tests {
         let i0 = n1.add_input(PortType::Value, o0.clone());
         let i1 = n1.add_input(PortType::Value, o0.clone());
 
+        assert_eq!(PortType::Value, i0.port_type());
+        assert_eq!(PortType::Value, i1.port_type());
+
         assert_eq!(2, n1.ins.len());
         assert_eq!(0, n1.outs.len());
 
         let mut users = o0.users();
+
         assert_eq!(Some(i0), users.next());
         assert_eq!(Some(i1), users.next());
         assert_eq!(None, users.next());
     }
 
     #[test]
-    #[should_panic="incompatible port types"]
+    #[should_panic = "incompatible port types"]
     fn create_nodes_with_wrong_port_type() {
         let mut n0 = Node::new();
         let o0 = n0.add_output(PortType::Value);

@@ -2,3 +2,4 @@
 
 mod rvsdg;
 mod lower;
+mod rvsdg_rc;

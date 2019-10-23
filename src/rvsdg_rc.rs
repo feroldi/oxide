@@ -1,6 +1,5 @@
 use std::{
     cell::RefCell,
-    fmt::{self, Debug},
     rc::{Rc, Weak},
 };
 
@@ -26,9 +25,10 @@ impl Port {
     }
 }
 
+#[derive(Debug)]
 struct Node {
     ins: Vec<Rc<InData>>,
-    outs: Vec<Rc<RefCell<OutData>>>,
+    outs: Vec<Rc<OutData>>,
 }
 
 #[derive(Debug)]
@@ -65,44 +65,48 @@ impl In {
     fn port_type(&self) -> PortType {
         self.data.port.port_type()
     }
+
+    fn origin(&self) -> Out {
+        self.data.origin.clone()
+    }
 }
 
 #[derive(Debug)]
 struct OutData {
-    users: Vec<Weak<InData>>,
+    users: RefCell<Vec<Weak<InData>>>,
     port: Port,
 }
 
 #[derive(Clone, Debug)]
 struct Out {
-    data: Rc<RefCell<OutData>>,
+    data: Rc<OutData>,
 }
 
 impl Out {
     fn new(port: Port) -> Out {
-        let output_data = Rc::new(RefCell::new(OutData {
-            users: Vec::new(),
+        let output_data = Rc::new(OutData {
+            users: RefCell::default(),
             port,
-        }));
+        });
 
         Out { data: output_data }
     }
 
     fn users(&self) -> impl Iterator<Item = In> {
         self.data
-            .borrow()
             .users
+            .borrow()
             .clone()
             .into_iter()
             .flat_map(|input| input.upgrade().and_then(|data| Some(In { data })))
     }
 
     fn add_user(&mut self, user: In) {
-        self.data.borrow_mut().users.push(Rc::downgrade(&user.data));
+        self.data.users.borrow_mut().push(Rc::downgrade(&user.data));
     }
 
     fn port_type(&self) -> PortType {
-        self.data.borrow().port.port_type()
+        self.data.port.port_type()
     }
 }
 
@@ -117,46 +121,6 @@ impl PartialEq for Out {
         Rc::ptr_eq(&self.data, &other.data)
     }
 }
-
-#[derive(Clone)]
-struct StructIn(In);
-
-#[derive(Clone)]
-struct StructOut(Out);
-
-#[derive(Clone)]
-struct Arg {
-    data: Rc<RefCell<ArgData>>,
-}
-
-struct ArgData {
-    input: StructIn,
-}
-
-#[derive(Clone)]
-struct Res {
-    data: Rc<RefCell<ResData>>,
-}
-
-struct ResData {
-    output: StructOut,
-}
-
-impl PartialEq for Arg {
-    fn eq(&self, other: &Arg) -> bool {
-        Rc::ptr_eq(&self.data, &other.data)
-    }
-}
-
-impl PartialEq for Res {
-    fn eq(&self, other: &Res) -> bool {
-        Rc::ptr_eq(&self.data, &other.data)
-    }
-}
-
-struct StructNode(Node);
-
-struct Region {}
 
 impl Node {
     fn new() -> Node {
@@ -228,5 +192,7 @@ mod tests {
 
         let mut n1 = Node::new();
         let i0 = n1.add_input(PortType::State, o0.clone());
+
+        assert_eq!(o0, i0.origin());
     }
 }

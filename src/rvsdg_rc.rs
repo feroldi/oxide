@@ -16,10 +16,6 @@ struct Port {
 }
 
 impl Port {
-    fn with_label(port_type: PortType, label: String) -> Port {
-        Port { port_type, label }
-    }
-
     fn port_type(&self) -> PortType {
         self.port_type
     }
@@ -37,13 +33,8 @@ struct InData {
     port: Port,
 }
 
-#[derive(Clone, Debug)]
-struct In {
-    data: Rc<InData>,
-}
-
-impl In {
-    fn with_origin(port: Port, origin: Out) -> In {
+impl InData {
+    fn with_origin(port: Port, origin: Out) -> Rc<InData> {
         assert_eq!(
             port.port_type(),
             origin.port_type(),
@@ -55,70 +46,112 @@ impl In {
             port,
         });
 
-        let input = In { data: input_data };
         let mut origin_mut = origin;
-        origin_mut.add_user(input.clone());
+        origin_mut.add_user(In::Simple {
+            data: input_data.clone(),
+        });
 
-        input
+        input_data
     }
+}
 
+#[derive(Clone, Debug)]
+enum In {
+    Simple { data: Rc<InData> },
+}
+
+impl In {
     fn port_type(&self) -> PortType {
-        self.data.port.port_type()
+        match self {
+            In::Simple { data } => data.port.port_type(),
+        }
     }
 
     fn origin(&self) -> Out {
-        self.data.origin.clone()
+        match self {
+            In::Simple { data } => data.origin.clone(),
+        }
     }
+}
+
+#[derive(Clone, Debug)]
+enum WeakIn {
+    Simple { data: Weak<InData> },
 }
 
 #[derive(Debug)]
 struct OutData {
-    users: RefCell<Vec<Weak<InData>>>,
+    users: RefCell<Vec<WeakIn>>,
     port: Port,
 }
 
-#[derive(Clone, Debug)]
-struct Out {
-    data: Rc<OutData>,
-}
-
-impl Out {
-    fn new(port: Port) -> Out {
+impl OutData {
+    fn new(port: Port) -> Rc<OutData> {
         let output_data = Rc::new(OutData {
             users: RefCell::default(),
             port,
         });
 
-        Out { data: output_data }
+        output_data
     }
+}
 
+#[derive(Clone, Debug)]
+enum Out {
+    Simple { data: Rc<OutData> },
+}
+
+impl Out {
     fn users(&self) -> impl Iterator<Item = In> {
-        self.data
-            .users
-            .borrow()
-            .clone()
-            .into_iter()
-            .flat_map(|input| input.upgrade().and_then(|data| Some(In { data })))
+        match self {
+            Out::Simple { data: out_data } => {
+                out_data
+                    .users
+                    .borrow()
+                    .clone()
+                    .into_iter()
+                    .flat_map(|input| match input {
+                        WeakIn::Simple { data: weak_in_data } => match weak_in_data.upgrade() {
+                            Some(in_data) => Some(In::Simple { data: in_data }),
+                            None => None,
+                        },
+                    })
+            }
+        }
     }
 
     fn add_user(&mut self, user: In) {
-        self.data.users.borrow_mut().push(Rc::downgrade(&user.data));
+        match self {
+            Out::Simple { data: out_data } => match user {
+                In::Simple { data: user_data } => {
+                    out_data.users.borrow_mut().push(WeakIn::Simple {
+                        data: Rc::downgrade(&user_data),
+                    })
+                }
+            },
+        }
     }
 
     fn port_type(&self) -> PortType {
-        self.data.port.port_type()
+        match self {
+            Out::Simple { data } => data.port.port_type(),
+        }
     }
 }
 
 impl PartialEq for In {
     fn eq(&self, other: &In) -> bool {
-        Rc::ptr_eq(&self.data, &other.data)
+        match (self, other) {
+            (In::Simple { data: lhs }, In::Simple { data: rhs }) => Rc::ptr_eq(&lhs, &rhs),
+        }
     }
 }
 
 impl PartialEq for Out {
     fn eq(&self, other: &Out) -> bool {
-        Rc::ptr_eq(&self.data, &other.data)
+        match (self, other) {
+            (Out::Simple { data: lhs }, Out::Simple { data: rhs }) => Rc::ptr_eq(&lhs, &rhs),
+        }
     }
 }
 
@@ -131,17 +164,25 @@ impl Node {
     }
 
     fn add_input(&mut self, port_type: PortType, origin: Out) -> In {
-        let port = Port::with_label(port_type, format!("i{}", self.ins.len()));
-        let input = In::with_origin(port, origin);
-        self.ins.push(input.data.clone());
-        input
+        let port = Port {
+            port_type,
+            label: format!("i{}", self.ins.len()),
+        };
+        let input_data = InData::with_origin(port, origin);
+        self.ins.push(input_data.clone());
+
+        In::Simple { data: input_data }
     }
 
     fn add_output(&mut self, port_type: PortType) -> Out {
-        let port = Port::with_label(port_type, format!("o{}", self.outs.len()));
-        let output = Out::new(port);
-        self.outs.push(output.data.clone());
-        output
+        let port = Port {
+            port_type,
+            label: format!("o{}", self.outs.len()),
+        };
+        let output_data = OutData::new(port);
+        self.outs.push(output_data.clone());
+
+        Out::Simple { data: output_data }
     }
 }
 

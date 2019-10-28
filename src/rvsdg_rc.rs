@@ -22,19 +22,72 @@ impl Port {
 }
 
 #[derive(Debug)]
-struct Node {
+struct NodeData {
     ins: Vec<Rc<InData>>,
     outs: Vec<Rc<OutData>>,
+}
+
+#[derive(Clone, Debug)]
+struct Node {
+    data: Rc<RefCell<NodeData>>,
+}
+
+impl PartialEq for Node {
+    fn eq(&self, other: &Node) -> bool {
+        Rc::ptr_eq(&self.data, &other.data)
+    }
+}
+
+impl Node {
+    fn new() -> Node {
+        Node {
+            data: Rc::new(RefCell::new(NodeData {
+                ins: Vec::new(),
+                outs: Vec::new(),
+            })),
+        }
+    }
+
+    fn add_input(&mut self, port_type: PortType, origin: Out) -> In {
+        let port = Port {
+            port_type,
+            label: format!("i{}", self.data.borrow().ins.len()),
+        };
+        let input_data = InData::with_origin(self.clone(), port, origin);
+        self.data.borrow_mut().ins.push(input_data.clone());
+
+        In::Simple { data: input_data }
+    }
+
+    fn add_output(&mut self, port_type: PortType) -> Out {
+        let port = Port {
+            port_type,
+            label: format!("o{}", self.data.borrow().outs.len()),
+        };
+        let output_data = OutData::new(self.clone(), port);
+        self.data.borrow_mut().outs.push(output_data.clone());
+
+        Out::Simple { data: output_data }
+    }
+
+    fn inputs_len(&self) -> usize {
+        self.data.borrow().ins.len()
+    }
+
+    fn outputs_len(&self) -> usize {
+        self.data.borrow().outs.len()
+    }
 }
 
 #[derive(Debug)]
 struct InData {
     origin: Out,
     port: Port,
+    consumer: Weak<RefCell<NodeData>>,
 }
 
 impl InData {
-    fn with_origin(port: Port, origin: Out) -> Rc<InData> {
+    fn with_origin(consumer: Node, port: Port, origin: Out) -> Rc<InData> {
         assert_eq!(
             port.port_type(),
             origin.port_type(),
@@ -44,6 +97,7 @@ impl InData {
         let input_data = Rc::new(InData {
             origin: origin.clone(),
             port,
+            consumer: Rc::downgrade(&consumer.data),
         });
 
         let mut origin_mut = origin;
@@ -52,6 +106,10 @@ impl InData {
         });
 
         input_data
+    }
+
+    fn consumer(&self) -> Option<Node> {
+        self.consumer.upgrade().map(|data| Node { data })
     }
 }
 
@@ -72,6 +130,12 @@ impl In {
             In::Simple { data } => data.origin.clone(),
         }
     }
+
+    fn consumer(&self) -> Option<Node> {
+        match self {
+            In::Simple { data } => data.consumer(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -79,20 +143,34 @@ enum WeakIn {
     Simple { data: Weak<InData> },
 }
 
+impl WeakIn {
+    fn upgrade(&self) -> Option<In> {
+        match self {
+            WeakIn::Simple { data } => data.upgrade().map(|data| In::Simple { data }),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct OutData {
     users: RefCell<Vec<WeakIn>>,
     port: Port,
+    producer: Weak<RefCell<NodeData>>,
 }
 
 impl OutData {
-    fn new(port: Port) -> Rc<OutData> {
+    fn new(node: Node, port: Port) -> Rc<OutData> {
         let output_data = Rc::new(OutData {
             users: RefCell::default(),
             port,
+            producer: Rc::downgrade(&node.data),
         });
 
         output_data
+    }
+
+    fn producer(&self) -> Option<Node> {
+        self.producer.upgrade().map(|data| Node { data })
     }
 }
 
@@ -104,19 +182,12 @@ enum Out {
 impl Out {
     fn users(&self) -> impl Iterator<Item = In> {
         match self {
-            Out::Simple { data: out_data } => {
-                out_data
-                    .users
-                    .borrow()
-                    .clone()
-                    .into_iter()
-                    .flat_map(|input| match input {
-                        WeakIn::Simple { data: weak_in_data } => match weak_in_data.upgrade() {
-                            Some(in_data) => Some(In::Simple { data: in_data }),
-                            None => None,
-                        },
-                    })
-            }
+            Out::Simple { data: out_data } => out_data
+                .users
+                .borrow()
+                .clone()
+                .into_iter()
+                .flat_map(|input| input.upgrade()),
         }
     }
 
@@ -137,6 +208,12 @@ impl Out {
             Out::Simple { data } => data.port.port_type(),
         }
     }
+
+    fn producer(&self) -> Option<Node> {
+        match self {
+            Out::Simple { data } => data.producer(),
+        }
+    }
 }
 
 impl PartialEq for In {
@@ -155,37 +232,6 @@ impl PartialEq for Out {
     }
 }
 
-impl Node {
-    fn new() -> Node {
-        Node {
-            ins: Vec::new(),
-            outs: Vec::new(),
-        }
-    }
-
-    fn add_input(&mut self, port_type: PortType, origin: Out) -> In {
-        let port = Port {
-            port_type,
-            label: format!("i{}", self.ins.len()),
-        };
-        let input_data = InData::with_origin(port, origin);
-        self.ins.push(input_data.clone());
-
-        In::Simple { data: input_data }
-    }
-
-    fn add_output(&mut self, port_type: PortType) -> Out {
-        let port = Port {
-            port_type,
-            label: format!("o{}", self.outs.len()),
-        };
-        let output_data = OutData::new(port);
-        self.outs.push(output_data.clone());
-
-        Out::Simple { data: output_data }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Node, PortType};
@@ -194,8 +240,8 @@ mod tests {
     fn create_node() {
         let n0 = Node::new();
 
-        assert_eq!(0, n0.ins.len());
-        assert_eq!(0, n0.outs.len());
+        assert_eq!(0, n0.inputs_len());
+        assert_eq!(0, n0.outputs_len());
     }
 
     #[test]
@@ -205,8 +251,8 @@ mod tests {
 
         assert_eq!(PortType::Value, o0.port_type());
 
-        assert_eq!(0, n0.ins.len());
-        assert_eq!(1, n0.outs.len());
+        assert_eq!(0, n0.inputs_len());
+        assert_eq!(1, n0.outputs_len());
 
         let mut n1 = Node::new();
         let i0 = n1.add_input(PortType::Value, o0.clone());
@@ -215,8 +261,8 @@ mod tests {
         assert_eq!(PortType::Value, i0.port_type());
         assert_eq!(PortType::Value, i1.port_type());
 
-        assert_eq!(2, n1.ins.len());
-        assert_eq!(0, n1.outs.len());
+        assert_eq!(2, n1.inputs_len());
+        assert_eq!(0, n1.outputs_len());
 
         let mut users = o0.users();
 
@@ -235,5 +281,27 @@ mod tests {
         let i0 = n1.add_input(PortType::State, o0.clone());
 
         assert_eq!(o0, i0.origin());
+    }
+
+    #[test]
+    fn producer_and_consumer() {
+        let mut n0 = Node::new();
+        let output = n0.add_output(PortType::Value);
+
+        assert_eq!(Some(&n0), output.producer().as_ref());
+
+        let mut n1 = Node::new();
+        let input = n1.add_input(PortType::Value, output.clone());
+
+        assert_eq!(Some(&n1), input.consumer().as_ref());
+        assert_eq!(Some(&n0), input.origin().producer().as_ref());
+        assert_eq!(
+            Some(&n1),
+            output
+                .users()
+                .next()
+                .and_then(|user| user.consumer())
+                .as_ref()
+        );
     }
 }

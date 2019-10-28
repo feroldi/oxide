@@ -77,6 +77,32 @@ impl Node {
     fn outputs_len(&self) -> usize {
         self.data.borrow().outs.len()
     }
+
+    fn inputs(&self) -> impl Iterator<Item = In> {
+        self.data
+            .borrow()
+            .ins
+            .clone()
+            .into_iter()
+            .map(|input| input.into())
+    }
+
+    fn outputs(&self) -> impl Iterator<Item = Out> {
+        self.data
+            .borrow()
+            .outs
+            .clone()
+            .into_iter()
+            .map(|output| output.into())
+    }
+
+    fn input(&self, index: usize) -> In {
+        self.data.borrow().ins[index].clone().into()
+    }
+
+    fn output(&self, index: usize) -> Out {
+        self.data.borrow().outs[index].clone().into()
+    }
 }
 
 #[derive(Debug)]
@@ -171,6 +197,14 @@ impl Region {
             data: argument_data,
         }
     }
+
+    fn result(&self, index: usize) -> In {
+        self.data.borrow().ress[index].clone().into()
+    }
+
+    fn argument(&self, index: usize) -> Out {
+        self.data.borrow().args[index].clone().into()
+    }
 }
 
 #[derive(Debug)]
@@ -179,6 +213,12 @@ struct ResData {
     origin: Out,
     output_map: Weak<OutData>,
     region: Weak<RefCell<RegionData>>,
+}
+
+impl Into<In> for Rc<ResData> {
+    fn into(self) -> In {
+        In::Region { data: self }
+    }
 }
 
 impl ResData {
@@ -217,6 +257,12 @@ struct ArgData {
     port: Port,
     input_map: Weak<InData>,
     region: Weak<RefCell<RegionData>>,
+}
+
+impl Into<Out> for Rc<ArgData> {
+    fn into(self) -> Out {
+        Out::Region { data: self }
+    }
 }
 
 impl ArgData {
@@ -467,6 +513,33 @@ mod tests {
 
         assert_eq!(Some(i0), users.next());
         assert_eq!(Some(i1), users.next());
+        assert_eq!(None, users.next());
+    }
+
+    #[test]
+    fn create_nodes_with_ports_indexing() {
+        let mut n0 = Node::new();
+        n0.add_output(PortTy::Value);
+
+        assert_eq!(PortTy::Value, n0.output(0).ty());
+
+        assert_eq!(0, n0.inputs_len());
+        assert_eq!(1, n0.outputs_len());
+
+        let mut n1 = Node::new();
+        n1.add_input(PortTy::Value, n0.output(0));
+        n1.add_input(PortTy::Value, n0.output(0));
+
+        assert_eq!(PortTy::Value, n1.input(0).ty());
+        assert_eq!(PortTy::Value, n1.input(1).ty());
+
+        assert_eq!(2, n1.inputs_len());
+        assert_eq!(0, n1.outputs_len());
+
+        let mut users = n0.output(0).users();
+
+        assert_eq!(Some(n1.input(0)), users.next());
+        assert_eq!(Some(n1.input(1)), users.next());
         assert_eq!(None, users.next());
     }
 

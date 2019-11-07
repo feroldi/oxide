@@ -107,6 +107,7 @@ pub(crate) struct InnerRegionList {
 }
 
 pub(crate) struct RegionData {
+    sequence_index: usize,
     res: Vec<UserData>,
     args: Vec<OriginData>,
     prev_region: Cell<Option<RegionId>>,
@@ -121,6 +122,7 @@ pub(crate) struct SigS {
     pub(crate) st_outs: usize,
 }
 
+// TODO: remove this and let region ports be imperatively created.
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub(crate) struct RegionSigS {
     pub(crate) val_args: usize,
@@ -153,6 +155,7 @@ pub(crate) trait Sig {
     fn sig(&self) -> SigS;
 }
 
+// TODO: implement this dynamically for structured nodes.
 impl<S: Sig> Sig for NodeData<S> {
     fn sig(&self) -> SigS {
         self.kind.sig()
@@ -271,7 +274,7 @@ impl<S> NodeCtxt<S> {
 
     pub(crate) fn print(&self, out: &mut dyn Write) -> io::Result<()>
     where
-        S: Sig + Debug + Copy,
+        S: Sig + Debug,
     {
         writeln!(out, "digraph rvsdg {{")?;
         writeln!(out, "    node [shape=record]")?;
@@ -643,7 +646,7 @@ impl<'g, S> Node<'g, S> {
     }
 }
 
-impl<'g, S: Sig + Copy> Node<'g, S> {
+impl<'g, S: Sig> Node<'g, S> {
     pub(crate) fn val_in(&self, port: usize) -> ValUser<'g, S> {
         let sig = self.data().sig();
         assert!(port < sig.val_ins);

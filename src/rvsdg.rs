@@ -17,7 +17,7 @@ pub(crate) struct NodeId(usize);
 pub(crate) struct RegionId(usize);
 
 /// An index for a UserData of an input or result port.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum UserId {
     In { node: NodeId, index: usize },
     Res { region: RegionId, index: usize },
@@ -208,6 +208,38 @@ pub(crate) struct NodeCtxt<S> {
     nodes: RefCell<Vec<NodeData<S>>>,
     regions: RefCell<Vec<RegionData>>,
     interned_nodes: RefCell<HashMap<NodeTerm<S>, NodeId>>,
+    config: NodeCtxtConfig,
+}
+
+pub(crate) struct NodeCtxtConfig {
+    pub(crate) opt_interning: bool,
+}
+
+impl Default for NodeCtxtConfig {
+    fn default() -> NodeCtxtConfig {
+        NodeCtxtConfig {
+            opt_interning: true,
+        }
+    }
+}
+
+impl<S> std::hash::Hash for NodeCtxt<S> {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: std::hash::Hasher,
+    {
+        state.write_usize(self as *const _ as usize);
+    }
+}
+
+impl<S> NodeCtxt<S> {
+    pub(crate) fn num_nodes(&self) -> usize {
+        self.nodes.borrow().len()
+    }
+
+    pub(crate) fn num_edges(&self) -> usize {
+        self.nodes.borrow().iter().map(|node| node.ins.len()).sum()
+    }
 }
 
 impl<S> NodeCtxt<S> {
@@ -219,6 +251,17 @@ impl<S> NodeCtxt<S> {
             nodes: RefCell::new(vec![]),
             regions: RefCell::new(vec![]),
             interned_nodes: RefCell::default(),
+            config: Default::default(),
+        }
+    }
+
+    pub(crate) fn with_config(config: NodeCtxtConfig) -> NodeCtxt<S>
+    where
+        S: Eq + Hash,
+    {
+        NodeCtxt {
+            config,
+            ..NodeCtxt::new()
         }
     }
 
@@ -472,19 +515,23 @@ impl<S> NodeCtxt<S> {
             origins: origins.into(),
         };
 
-        let node_hash = self.compute_node_hash(&node_term);
-        let mut interned_nodes = self.interned_nodes.borrow_mut();
-        let entry = interned_nodes
-            .raw_entry_mut()
-            .from_key_hashed_nocheck(node_hash, &node_term);
+        if self.config.opt_interning {
+            let node_hash = self.compute_node_hash(&node_term);
+            let mut interned_nodes = self.interned_nodes.borrow_mut();
+            let entry = interned_nodes
+                .raw_entry_mut()
+                .from_key_hashed_nocheck(node_hash, &node_term);
 
-        match entry {
-            RawEntryMut::Occupied(e) => *e.get(),
-            RawEntryMut::Vacant(e) => {
-                let node_id = create_node(kind, origins);
-                e.insert_hashed_nocheck(node_hash, node_term, node_id);
-                node_id
+            match entry {
+                RawEntryMut::Occupied(e) => *e.get(),
+                RawEntryMut::Vacant(e) => {
+                    let node_id = create_node(kind, origins);
+                    e.insert_hashed_nocheck(node_hash, node_term, node_id);
+                    node_id
+                }
             }
+        } else {
+            create_node(kind, origins)
         }
     }
 
@@ -548,6 +595,8 @@ impl<S> PartialEq for NodeCtxt<S> {
         ptr::eq(self, other)
     }
 }
+
+impl<S> Eq for NodeCtxt<S> {}
 
 pub(crate) struct NodeBuilder<'g, S> {
     ctxt: &'g NodeCtxt<S>,
@@ -637,6 +686,10 @@ impl<'g, S: fmt::Debug> fmt::Debug for Node<'g, S> {
 }
 
 impl<'g, S> Node<'g, S> {
+    pub(crate) fn id(&self) -> NodeId {
+        self.id
+    }
+
     pub(crate) fn data(&self) -> Ref<'g, NodeData<S>> {
         self.ctxt.node_data(self.id)
     }
@@ -684,7 +737,7 @@ impl<'g, S: Sig> Node<'g, S> {
     }
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) struct User<'g, S> {
     ctxt: &'g NodeCtxt<S>,
     user_id: UserId,
@@ -711,7 +764,7 @@ impl<'g, S> User<'g, S> {
     }
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Origin<'g, S> {
     ctxt: &'g NodeCtxt<S>,
     origin_id: OriginId,
@@ -825,7 +878,7 @@ impl<'g, S> StUser<'g, S> {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ValOrigin<'g, S>(Origin<'g, S>);
 
 impl<'g, S> ValOrigin<'g, S> {
@@ -847,7 +900,7 @@ impl<'g, S> ValOrigin<'g, S> {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) struct StOrigin<'g, S>(Origin<'g, S>);
 
 impl<'g, S> StOrigin<'g, S> {
@@ -1302,5 +1355,22 @@ mod test {
                 ..RegionSigS::default()
             },
         );
+    }
+
+    #[test]
+    fn bug_traverse() {
+        let ncx = NodeCtxt::new();
+
+        let n0 = ncx.mk_node(TestData::Lit(0));
+        let n1 = ncx
+            .node_builder(TestData::Neg)
+            .operand(n0.val_out(0))
+            .finish();
+        let o = n1.val_in(0).origin().producer();
+        let op = *o.kind();
+        let n2 = ncx
+            .node_builder(TestData::Neg)
+            .operand(n1.val_out(0))
+            .finish();
     }
 }

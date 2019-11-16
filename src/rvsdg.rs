@@ -139,6 +139,10 @@ impl SigS {
     pub(crate) fn num_output_ports(&self) -> usize {
         self.val_outs + self.st_outs
     }
+
+    fn is_side_effectful(&self) -> bool {
+        self.st_outs > 0
+    }
 }
 
 impl RegionSigS {
@@ -515,7 +519,7 @@ impl<S> NodeCtxt<S> {
             origins: origins.into(),
         };
 
-        if self.config.opt_interning {
+        if self.config.opt_interning && !kind.sig().is_side_effectful() {
             let node_hash = self.compute_node_hash(&node_term);
             let mut interned_nodes = self.interned_nodes.borrow_mut();
             let entry = interned_nodes
@@ -1372,5 +1376,72 @@ mod test {
             .node_builder(TestData::Neg)
             .operand(n1.val_out(0))
             .finish();
+    }
+
+    #[test]
+    fn do_not_intern_stateful_nodes() {
+        #[derive(Clone, Hash, PartialEq, Eq)]
+        enum Inst {
+            Val(usize),
+            Stateful,
+            Stateless,
+        }
+
+        impl Sig for Inst {
+            fn sig(&self) -> SigS {
+                match self {
+                    Inst::Val(..) => SigS {
+                        val_outs: 1,
+                        ..SigS::default()
+                    },
+                    Inst::Stateful => SigS {
+                        val_ins: 1,
+                        val_outs: 1,
+                        st_outs: 1,
+                        ..SigS::default()
+                    },
+                    Inst::Stateless => SigS {
+                        val_ins: 1,
+                        st_ins: 1,
+                        val_outs: 1,
+                        ..SigS::default()
+                    }
+                }
+            }
+        }
+
+        let ncx = NodeCtxt::new();
+
+        let n_val = ncx.mk_node(Inst::Val(42));
+
+        let n_stateful_1 = ncx.node_builder(Inst::Stateful)
+            .operand(n_val.val_out(0))
+            .finish();
+
+        let n_stateful_2 = ncx.node_builder(Inst::Stateful)
+            .operand(n_val.val_out(0))
+            .finish();
+
+        assert_ne!(n_stateful_1.id(), n_stateful_2.id());
+
+        let n_stateless_1 = ncx.node_builder(Inst::Stateless)
+            .operand(n_stateful_1.val_out(0))
+            .state(n_stateful_1.st_out(0))
+            .finish();
+
+        let n_stateless_2 = ncx.node_builder(Inst::Stateless)
+            .operand(n_stateful_1.val_out(0))
+            .state(n_stateful_1.st_out(0))
+            .finish();
+
+        assert_eq!(n_stateless_1.id(), n_stateless_2.id());
+
+        let n_stateless_3 = ncx.node_builder(Inst::Stateless)
+            .operand(n_stateful_2.val_out(0))
+            .state(n_stateful_2.st_out(0))
+            .finish();
+
+        assert_ne!(n_stateless_3.id(), n_stateless_1.id());
+        assert_ne!(n_stateless_3.id(), n_stateless_2.id());
     }
 }
